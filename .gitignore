@@ -1,0 +1,29 @@
+# Environment
+.env
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# IDE / OS
+.DS_Store
+.vscode/
+.idea/
+
+# Logs and runtime artifacts
+logs/
+*.log
+prometheus_data/
+grafana_data/
+
+# Build
+build/
+dist/
