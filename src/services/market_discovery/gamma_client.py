@@ -24,17 +24,27 @@ class GammaClient:
     async def close(self) -> None:
         await self._client.aclose()
 
-    async def list_markets(self, *, limit: int = 200) -> list[dict[str, Any]]:
+    async def list_markets(
+        self,
+        *,
+        limit: int = 200,
+        offset: int | None = None,
+        active: bool | None = True,
+        closed: bool | None = False,
+    ) -> list[dict[str, Any]]:
         last_error: Exception | None = None
         for attempt in range(1, self._max_retries + 1):
             try:
+                params: dict[str, str | int] = {"limit": limit}
+                if offset is not None:
+                    params["offset"] = offset
+                if active is not None:
+                    params["active"] = str(active).lower()
+                if closed is not None:
+                    params["closed"] = str(closed).lower()
                 response = await self._client.get(
                     f"{self._base_url}/markets",
-                    params={
-                        "active": "true",
-                        "closed": "false",
-                        "limit": limit,
-                    },
+                    params=params,
                 )
                 response.raise_for_status()
                 payload = response.json()
