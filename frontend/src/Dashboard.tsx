@@ -611,6 +611,7 @@ export function Dashboard({ onLogout, onNavigate }: DashboardProps) {
 
   const wsRef = useRef<WebSocket | null>(null);
   const noticeIdRef = useRef(0);
+  const previousSignalRef = useRef<SignalResult | null>(null);
 
   const pushNotice = useCallback((item: Omit<NotificationItem, 'id'>) => {
     const id = ++noticeIdRef.current;
@@ -751,33 +752,15 @@ export function Dashboard({ onLogout, onNavigate }: DashboardProps) {
   }, [wsConnected]);
 
   useEffect(() => {
-    pushNotice({
-      type: 'info',
-      message: 'NEW POSITION OPENED — BTC UP @ 52¢',
-      detail: '🔊 GAME ALERT / ORDER CONFIRMED',
-    });
+    const previousSignal = previousSignalRef.current;
+    previousSignalRef.current = state.signal.result;
 
-    const exitDemoTimer = window.setTimeout(() => {
-      pushNotice({
-        type: 'win',
-        message: '[WIN] +$1.92 — PROFIT TARGET HIT',
-        detail: 'Position closed by strategy rule',
-      });
-    }, 12_000);
-
-    return () => window.clearTimeout(exitDemoTimer);
-  }, [pushNotice]);
-
-  useEffect(() => {
-    const crossedRsi = state.signal.rsiPrev < 30 && state.signal.rsi >= 30;
-    const crossedStoch = state.signal.stochK > state.signal.stochD;
-
-    if (crossedRsi || crossedStoch) {
+    if (state.signal.result !== 'NONE' && previousSignal !== state.signal.result) {
       setShowCrossoverOverlay(true);
       const timer = window.setTimeout(() => setShowCrossoverOverlay(false), 3000);
       return () => window.clearTimeout(timer);
     }
-  }, [state.signal.rsi, state.signal.rsiPrev, state.signal.stochD, state.signal.stochK]);
+  }, [state.signal.result]);
 
   useEffect(() => {
     if (state.killSwitch !== 'TRIPPED') return;
