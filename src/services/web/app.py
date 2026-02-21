@@ -108,7 +108,9 @@ async def _build_dashboard_snapshot(
         net_pnl_today = sum((_trade_pnl(row) for row in trades_today), Decimal("0"))
         daily_loss_used = abs(net_pnl_today) if net_pnl_today < 0 else Decimal("0")
 
-        open_positions = await _count_open_positions(session)
+        db_open_positions = await _count_open_positions(session)
+        wallet_open_count = wallet_snapshot.get("openPositionsCount", 0)
+        open_positions = max(db_open_positions, wallet_open_count)
 
         ai_total = await _count_ai(session)
         ai_veto = await _count_ai(session, proceed=False)
@@ -129,6 +131,7 @@ async def _build_dashboard_snapshot(
         latest_market=latest_market,
         settings=settings,
         now=now,
+        wallet_positions=wallet_snapshot.get("openPositions") or [],
     )
 
     signal_payload = _signal_payload(latest_signal=latest_signal, signal_series=signal_series)
@@ -172,7 +175,10 @@ async def _build_dashboard_snapshot(
         "signal": signal_payload,
         "ai": ai_payload,
         "market": {
-            "slug": latest_market.market_slug if latest_market is not None else "n/a",
+            "slug": latest_market.market_slug if latest_market is not None else (
+                (wallet_snapshot.get("openPositions") or [{}])[0].get("slug", "n/a")
+                if wallet_snapshot.get("openPositions") else "n/a"
+            ),
             "candleOpen": _format_utc(latest_market.candle_open_utc) if latest_market is not None else "n/a",
             "candleClose": _format_utc(latest_market.market_end_time) if latest_market is not None else "n/a",
             "remainingSeconds": remaining_seconds,
@@ -327,39 +333,71 @@ def _position_payload(
     latest_market: MarketSessionModel | None,
     settings: Settings,
     now: datetime,
+    wallet_positions: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    if open_trade is None:
+    exit_mode = "SCALP MODE" if settings.exit_mode.value == "SCALP" else "HOLD MODE"
+
+    if open_trade is not None:
+        entry_price = _to_float(open_trade.price_entry if open_trade.price_entry is not None else open_trade.price)
+        current_price = entry_price
+        if open_trade.price_exit is not None:
+            current_price = _to_float(open_trade.price_exit)
+        elif latest_market is not None:
+            current_price = entry_price
+
+        size_usdc = _to_float(open_trade.size_usdc)
+        shares = size_usdc / entry_price if entry_price > 0 else 0.0
+        unrealized = (current_price - entry_price) * shares
+        hold_seconds = max(0, int((now - open_trade.candle_open_utc).total_seconds()))
+
         return {
-            "open": False,
-            "token": "BTC UP",
-            "entryPrice": 0.5,
-            "currentPrice": 0.5,
-            "unrealizedPnl": 0.0,
-            "holdSeconds": 0,
-            "exitMode": "SCALP MODE" if settings.exit_mode.value == "SCALP" else "HOLD MODE",
+            "open": True,
+            "token": "BTC UP" if open_trade.direction == "UP" else "BTC DOWN",
+            "entryPrice": round(entry_price, 6),
+            "currentPrice": round(current_price, 6),
+            "unrealizedPnl": round(unrealized, 6),
+            "holdSeconds": hold_seconds,
+            "exitMode": exit_mode,
+            "source": "db",
         }
 
-    entry_price = _to_float(open_trade.price_entry if open_trade.price_entry is not None else open_trade.price)
-    current_price = entry_price
-    if open_trade.price_exit is not None:
-        current_price = _to_float(open_trade.price_exit)
-    elif latest_market is not None:
-        # No persisted live mark price in DB yet; use conservative carry on entry.
-        current_price = entry_price
+    # Fallback: use live wallet positions from Polymarket API
+    if wallet_positions:
+        wp = wallet_positions[0]
+        entry_price = wp.get("avgPrice", 0.5)
+        current_price = wp.get("currentPrice", entry_price)
+        size = wp.get("currentValueUsdc", 0.0)
+        shares = size / current_price if current_price > 0 else 0.0
+        unrealized = wp.get("cashPnlUsdc", (current_price - entry_price) * shares)
+        outcome = str(wp.get("outcome", "")).upper()
+        slug = str(wp.get("slug", ""))
+        if "up" in outcome.lower() or "yes" in outcome.lower():
+            token = "BTC UP"
+        elif "down" in outcome.lower() or "no" in outcome.lower():
+            token = "BTC DOWN"
+        else:
+            token = f"{outcome} ({slug[:30]})"
 
-    size_usdc = _to_float(open_trade.size_usdc)
-    shares = size_usdc / entry_price if entry_price > 0 else 0.0
-    unrealized = (current_price - entry_price) * shares
-    hold_seconds = max(0, int((now - open_trade.candle_open_utc).total_seconds()))
+        return {
+            "open": True,
+            "token": token,
+            "entryPrice": round(entry_price, 6),
+            "currentPrice": round(current_price, 6),
+            "unrealizedPnl": round(unrealized, 6),
+            "holdSeconds": 0,
+            "exitMode": exit_mode,
+            "source": "wallet",
+        }
 
     return {
-        "open": True,
-        "token": "BTC UP" if open_trade.direction == "UP" else "BTC DOWN",
-        "entryPrice": round(entry_price, 6),
-        "currentPrice": round(current_price, 6),
-        "unrealizedPnl": round(unrealized, 6),
-        "holdSeconds": hold_seconds,
-        "exitMode": "SCALP MODE" if settings.exit_mode.value == "SCALP" else "HOLD MODE",
+        "open": False,
+        "token": "BTC UP",
+        "entryPrice": 0.5,
+        "currentPrice": 0.5,
+        "unrealizedPnl": 0.0,
+        "holdSeconds": 0,
+        "exitMode": exit_mode,
+        "source": "none",
     }
 
 
