@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
+from src.core.clock import interval_to_seconds
 from src.core.exceptions import MarketDiscoveryError
 from src.core.types import MarketContext
 from src.services.market_discovery.gamma_client import GammaClient
@@ -18,7 +19,6 @@ class MarketFinder:
     _HOURLY_TEXT_MARKERS = ("hour", "hourly", "1h", "60 minute", "60m")
     _UP_DOWN_MARKERS = ("up or down", "up/down")
     _SLUG_TIME_MARKER_RE = re.compile(r"(?:^|-)(?:[1-9]|1[0-2])(?:am|pm)(?:-|$)")
-    _INTERVAL_RE = re.compile(r"^\s*(\d+)\s*([mhd])\s*$", re.IGNORECASE)
 
     def __init__(
         self,
@@ -30,7 +30,7 @@ class MarketFinder:
         self._gamma_client = gamma_client
         self._validator = validator
         self._target_interval = target_interval.lower()
-        self._target_interval_seconds = self._parse_interval_seconds(self._target_interval)
+        self._target_interval_seconds = interval_to_seconds(self._target_interval)
 
     async def discover_next_market(self, *, now_utc: datetime | None = None) -> MarketContext:
         now = now_utc or datetime.now(tz=timezone.utc)
@@ -47,7 +47,8 @@ class MarketFinder:
         if not candidates:
             sample = ", ".join(self._sample_market_names(markets))
             raise MarketDiscoveryError(
-                f"No active BTC hourly market found{f' (sample={sample})' if sample else ''}"
+                f"No active BTC up/down market found for interval={self._target_interval}"
+                f"{f' (sample={sample})' if sample else ''}"
             )
 
         candidates.sort(key=lambda item: item.market_end_time)
@@ -153,19 +154,27 @@ class MarketFinder:
         if self._target_interval_seconds >= 3600 and any(token in title for token in self._LOWER_TIMEFRAME_MARKERS):
             return False
 
-        if self._target_interval_seconds == 3600 and any(token in title for token in self._HOURLY_TEXT_MARKERS):
+        if self._target_interval_seconds >= 3600 and any(token in title for token in self._HOURLY_TEXT_MARKERS):
             return True
 
         if self._target_interval_seconds == 300 and any(token in title for token in ("5 minute", "5m", "five minute")):
             return True
 
         slug = str(market.get("slug") or market.get("market_slug") or "").lower()
-        if self._looks_like_hourly_slug(slug):
+        if self._looks_like_target_interval_slug(slug):
             return True
 
         duration_seconds = self._extract_duration_seconds(market)
         if duration_seconds is not None and self._duration_matches_target(duration_seconds):
             return True
+
+        # Last fallback for hourly markets that omit explicit "hourly" markers in slug/title.
+        if self._target_interval_seconds == 3600:
+            has_direction_pair = ("up" in title and "down" in title) or ("yes" in title and "no" in title)
+            padded_title = f" {title} "
+            has_time_marker = " am " in padded_title or " pm " in padded_title or " et" in title or " utc" in title
+            if has_direction_pair and has_time_marker:
+                return True
 
         return False
 
@@ -244,37 +253,26 @@ class MarketFinder:
                 return value
         return None
 
-    @staticmethod
-    def _looks_like_hourly_slug(slug: str) -> bool:
+    def _looks_like_target_interval_slug(self, slug: str) -> bool:
         if not slug:
             return False
         if "btc" not in slug and "bitcoin" not in slug:
             return False
         if "up-or-down" not in slug and "updown" not in slug:
             return False
-        if ("hour" in slug) or ("1h" in slug) or ("60m" in slug):
-            return True
-        if ("5-minute" in slug) or ("5m" in slug):
-            return True
-        if MarketFinder._SLUG_TIME_MARKER_RE.search(slug):
-            return True
-        return False
 
-    @classmethod
-    def _parse_interval_seconds(cls, interval: str) -> int:
-        match = cls._INTERVAL_RE.match(interval)
-        if not match:
-            # Fallback to 1h default if someone sets uncommon TAAPI interval format.
-            return 3600
-        amount = int(match.group(1))
-        unit = match.group(2).lower()
-        if unit == "m":
-            return amount * 60
-        if unit == "h":
-            return amount * 3600
-        if unit == "d":
-            return amount * 86400
-        return 3600
+        if self._target_interval_seconds == 300:
+            return ("5-minute" in slug) or ("5m" in slug)
+
+        if self._target_interval_seconds >= 3600:
+            if ("5-minute" in slug) or ("5m" in slug) or ("15-minute" in slug) or ("30-minute" in slug):
+                return False
+            if ("hour" in slug) or ("1h" in slug) or ("60m" in slug):
+                return True
+            if MarketFinder._SLUG_TIME_MARKER_RE.search(slug):
+                return True
+
+        return False
 
     def _extract_condition_id(self, market: dict[str, Any]) -> str:
         condition_id = str(market.get("conditionId") or market.get("condition_id") or "").strip()

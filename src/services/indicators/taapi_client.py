@@ -8,7 +8,7 @@ from typing import Any
 import httpx
 
 from src.config.settings import Settings
-from src.core.clock import utc_floor_hour, utc_now
+from src.core.clock import utc_floor_interval, utc_now
 from src.core.exceptions import APIFailureError
 from src.core.types import IndicatorSnapshot
 
@@ -98,7 +98,7 @@ class TaapiClient:
         now_utc = utc_now().astimezone(timezone.utc)
         return IndicatorSnapshot(
             evaluated_at=now_utc,
-            candle_open_utc=utc_floor_hour(now_utc),
+            candle_open_utc=utc_floor_interval(now_utc, interval=self._settings.taapi_interval),
             rsi_prev=rsi_prev,
             rsi_curr=rsi_curr,
             stoch_k_prev=k_prev,

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, time, timezone
+from datetime import datetime, time, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
@@ -11,7 +11,7 @@ from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config.settings import Settings, get_settings
-from src.core.clock import utc_now
+from src.core.clock import interval_to_seconds, utc_now
 from src.core.enums import OrderStatus, ProposalStatus
 from src.db.engine import Database
 from src.db.models import AIDecisionModel, MarketSessionModel, SignalModel, TradeModel
@@ -66,12 +66,17 @@ def create_app() -> FastAPI:
 
 async def _build_dashboard_snapshot(*, settings: Settings, database: Database) -> dict[str, Any]:
     now = utc_now()
+    interval_seconds = max(60, interval_to_seconds(settings.taapi_interval))
     today_start = datetime.combine(now.date(), time.min, tzinfo=timezone.utc)
     today_end = datetime.combine(now.date(), time.max, tzinfo=timezone.utc)
 
     async with database.session() as session:
         latest_signal = await _latest_signal(session)
-        latest_market = await _latest_market(session)
+        latest_market = await _latest_market(
+            session,
+            now_utc=now,
+            interval_seconds=interval_seconds,
+        )
         latest_ai = await _latest_ai_decision(session)
         latest_trade = await _latest_trade(session)
         open_trade = await _latest_open_trade(session)
@@ -158,6 +163,7 @@ async def _build_dashboard_snapshot(*, settings: Settings, database: Database) -
             "candleOpen": _format_utc(latest_market.candle_open_utc) if latest_market is not None else "n/a",
             "candleClose": _format_utc(latest_market.market_end_time) if latest_market is not None else "n/a",
             "remainingSeconds": remaining_seconds,
+            "intervalSeconds": interval_seconds,
             "spreadCents": round(
                 _to_float(latest_signal.spread_at_eval) * 100 if latest_signal and latest_signal.spread_at_eval else 0.0,
                 4,
@@ -177,9 +183,29 @@ async def _latest_signal(session: AsyncSession) -> SignalModel | None:
     return (await session.execute(query)).scalars().first()
 
 
-async def _latest_market(session: AsyncSession) -> MarketSessionModel | None:
-    query = select(MarketSessionModel).order_by(MarketSessionModel.candle_open_utc.desc()).limit(1)
-    return (await session.execute(query)).scalars().first()
+async def _latest_market(
+    session: AsyncSession,
+    *,
+    now_utc: datetime,
+    interval_seconds: int,
+) -> MarketSessionModel | None:
+    lookback = timedelta(seconds=max(interval_seconds * 3, 900))
+    lookahead = timedelta(seconds=max(interval_seconds * 3, 900))
+    query = (
+        select(MarketSessionModel)
+        .where(
+            and_(
+                MarketSessionModel.market_end_time >= now_utc - lookback,
+                MarketSessionModel.market_end_time <= now_utc + lookahead,
+            )
+        )
+        .order_by(MarketSessionModel.market_end_time.asc())
+        .limit(1)
+    )
+    row = (await session.execute(query)).scalars().first()
+    if row is not None:
+        return row
+    return None
 
 
 async def _latest_ai_decision(session: AsyncSession) -> AIDecisionModel | None:

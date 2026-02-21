@@ -91,6 +91,7 @@ interface MarketState {
   candleOpen: string;
   candleClose: string;
   remainingSeconds: number;
+  intervalSeconds: number;
   spreadCents: number;
   upPriceCents: number;
   downPriceCents: number;
@@ -212,6 +213,7 @@ const MOCK_DASHBOARD: DashboardState = {
     candleOpen: '14:00 UTC',
     candleClose: '15:00 UTC',
     remainingSeconds: 51 * 60 + 26,
+    intervalSeconds: 3600,
     spreadCents: 1.8,
     upPriceCents: 52,
     downPriceCents: 47.8,
@@ -629,11 +631,16 @@ export function Dashboard({ onLogout, onNavigate }: DashboardProps) {
   }, []);
 
   const totalPnl = useMemo(() => state.pnlSeries[state.pnlSeries.length - 1]?.pnl ?? 0, [state.pnlSeries]);
+  const intervalSeconds = useMemo(
+    () => Math.max(60, state.market.intervalSeconds || 3600),
+    [state.market.intervalSeconds],
+  );
 
   const candleProgress = useMemo(() => {
-    const elapsed = 3600 - state.market.remainingSeconds;
-    return Math.max(0, Math.min(100, (elapsed / 3600) * 100));
-  }, [state.market.remainingSeconds]);
+    const boundedRemaining = Math.max(0, Math.min(intervalSeconds, state.market.remainingSeconds));
+    const elapsed = intervalSeconds - boundedRemaining;
+    return Math.max(0, Math.min(100, (elapsed / intervalSeconds) * 100));
+  }, [intervalSeconds, state.market.remainingSeconds]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -1428,7 +1435,11 @@ export function Dashboard({ onLogout, onNavigate }: DashboardProps) {
           </div>
 
           <div className="flex items-center gap-3 border border-[#0D2137] bg-[#050A0F] p-2">
-            <RingGauge value={state.market.remainingSeconds} max={3600} color={COLORS.cyan} />
+            <RingGauge
+              value={Math.max(0, Math.min(intervalSeconds, state.market.remainingSeconds))}
+              max={intervalSeconds}
+              color={COLORS.cyan}
+            />
             <div>
               <p className="uppercase tracking-[0.16em]">Time remaining</p>
               <p className="mt-1 font-['JetBrains_Mono'] text-lg text-[#E0F4FF]">

@@ -128,3 +128,26 @@ async def test_market_finder_can_target_five_minute_contracts() -> None:
     assert context.condition_id == "cond-5m"
     assert context.token_id_up == "up5"
     assert context.token_id_down == "down5"
+
+
+@pytest.mark.asyncio
+async def test_market_finder_five_minute_target_rejects_hourly_market() -> None:
+    now = datetime.now(tz=timezone.utc)
+    payload = [
+        {
+            "question": "Bitcoin Up or Down - Hourly",
+            "slug": "bitcoin-up-or-down-hourly-1739836800",
+            "conditionId": "cond-1h",
+            "clobTokenIds": ["up1h", "down1h"],
+            "bestBid": "0.50",
+            "bestAsk": "0.52",
+            "tickSize": "0.01",
+            "resolutionSource": "Binance",
+            "startDate": now.isoformat(),
+            "endDate": (now + timedelta(hours=1)).isoformat(),
+        }
+    ]
+
+    finder = MarketFinder(FakeGammaClient(payload), MarketValidator(Settings()), target_interval="5m")
+    with pytest.raises(MarketDiscoveryError):
+        await finder.discover_next_market(now_utc=now)
