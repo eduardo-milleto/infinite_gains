@@ -38,9 +38,7 @@ class MarketFinder:
 
     def _to_market_context(self, market: dict[str, Any]) -> MarketContext | None:
         title = str(market.get("question") or market.get("title") or market.get("slug") or "").lower()
-        if "btc" not in title and "bitcoin" not in title:
-            return None
-        if "hour" not in title and "1h" not in title:
+        if not self._is_target_btc_hourly_market(market, title):
             return None
 
         condition_id = str(market.get("conditionId") or market.get("condition_id") or "")
@@ -92,6 +90,35 @@ class MarketFinder:
             up_price=up_price,
             down_price=down_price,
         )
+
+    def _is_target_btc_hourly_market(self, market: dict[str, Any], title: str) -> bool:
+        if "btc" not in title and "bitcoin" not in title:
+            return False
+
+        # Explicitly reject shorter intraday contracts.
+        lower_timeframes = ("5 minute", "5m", "15 minute", "15m", "30 minute", "30m")
+        if any(token in title for token in lower_timeframes):
+            return False
+
+        # Accept explicit hourly wording quickly.
+        if "hour" in title or "1h" in title or "60 minute" in title or "60m" in title:
+            return True
+
+        # Fall back to duration-based detection when start/end exist.
+        start_raw = market.get("startDate") or market.get("start_date") or market.get("startTime")
+        end_raw = market.get("endDate") or market.get("end_date") or market.get("endTime")
+        if not start_raw or not end_raw:
+            return False
+
+        try:
+            start = self._parse_datetime(str(start_raw))
+            end = self._parse_datetime(str(end_raw))
+        except ValueError:
+            return False
+
+        duration_seconds = (end - start).total_seconds()
+        # Hourly markets are expected around 60 minutes; keep a tolerance window.
+        return 45 * 60 <= duration_seconds <= 75 * 60
 
     @staticmethod
     def _parse_datetime(value: str) -> datetime:
