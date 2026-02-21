@@ -17,11 +17,22 @@ class MarketFinder:
     _PAGE_LIMIT = 500
     _MAX_SCAN_PAGES = 8
     _MAX_CANDIDATES_BUFFER = 80
+    _SEARCH_LIMIT = 300
     _LOWER_TIMEFRAME_MARKERS = ("1 minute", "1m", "5 minute", "5m", "15 minute", "15m", "30 minute", "30m")
     _UPPER_TIMEFRAME_MARKERS = ("day", "daily", "week", "weekly", "month", "monthly")
     _HOURLY_TEXT_MARKERS = ("hour", "hourly", "1h", "60 minute", "60m")
     _UP_DOWN_MARKERS = ("up or down", "up/down")
     _SLUG_TIME_MARKER_RE = re.compile(r"(?:^|-)(?:[1-9]|1[0-2])(?:am|pm)(?:-|$)")
+    _SEARCH_QUERIES_5M = (
+        "bitcoin up or down 5 minutes",
+        "btc up or down 5 minutes",
+        "bitcoin up or down",
+    )
+    _SEARCH_QUERIES_1H = (
+        "bitcoin up or down hourly",
+        "btc up or down hourly",
+        "bitcoin up or down",
+    )
 
     def __init__(
         self,
@@ -46,11 +57,15 @@ class MarketFinder:
         limit: int = 20,
     ) -> list[MarketContext]:
         now = now_utc or datetime.now(tz=timezone.utc)
-        candidates, markets = await self._scan_markets(now_utc=now, active=True, closed=False)
+        candidates, markets = await self._search_candidates(now_utc=now, active=True, closed=False)
+        if not candidates:
+            candidates, markets = await self._scan_markets(now_utc=now, active=True, closed=False)
 
         if not candidates:
-            # Fallback query: some Gamma payloads omit `active` semantics for intraday contracts.
-            candidates, fallback_markets = await self._scan_markets(now_utc=now, active=None, closed=False)
+            # Some payloads omit `active` semantics for intraday contracts.
+            candidates, fallback_markets = await self._search_candidates(now_utc=now, active=None, closed=False)
+            if not candidates:
+                candidates, fallback_markets = await self._scan_markets(now_utc=now, active=None, closed=False)
             if fallback_markets:
                 markets = fallback_markets
 
@@ -81,6 +96,44 @@ class MarketFinder:
 
         return validated[: max(1, limit)]
 
+    async def _search_candidates(
+        self,
+        *,
+        now_utc: datetime,
+        active: bool | None,
+        closed: bool | None,
+    ) -> tuple[list[MarketContext], list[dict[str, Any]]]:
+        search_method = getattr(self._gamma_client, "public_search", None)
+        if search_method is None:
+            return [], []
+
+        scanned: list[dict[str, Any]] = []
+        candidates: list[MarketContext] = []
+        queries = self._search_queries()
+        for query in queries:
+            try:
+                batch = await search_method(
+                    query=query,
+                    limit=self._SEARCH_LIMIT,
+                    active=active,
+                    closed=closed,
+                )
+            except Exception:
+                continue
+            if not batch:
+                continue
+            scanned.extend(batch)
+            candidates.extend(self._extract_candidates(batch, now_utc=now_utc))
+            if len(candidates) >= self._MAX_CANDIDATES_BUFFER:
+                break
+
+        return candidates, scanned
+
+    def _search_queries(self) -> tuple[str, ...]:
+        if self._target_interval_seconds == 300:
+            return self._SEARCH_QUERIES_5M
+        return self._SEARCH_QUERIES_1H
+
     async def _scan_markets(
         self,
         *,
@@ -95,6 +148,8 @@ class MarketFinder:
             batch = await self._gamma_client.list_markets(
                 limit=self._PAGE_LIMIT,
                 offset=offset,
+                order="volume",
+                ascending=False,
                 active=active,
                 closed=closed,
             )

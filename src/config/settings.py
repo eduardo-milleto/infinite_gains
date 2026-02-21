@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     poly_private_key: SecretStr = Field(default=SecretStr(""), repr=False)
     poly_funder_address: str = ""
     poly_chain_id: int = 137
+    poly_signature_type: int = 1
     poly_clob_host: str = "https://clob.polymarket.com"
     poly_ws_host: str = "wss://ws-subscriptions-clob.polymarket.com/ws/"
     poly_api_key: SecretStr = Field(default=SecretStr(""), repr=False)

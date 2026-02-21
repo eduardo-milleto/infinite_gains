@@ -11,23 +11,41 @@ from src.services.market_discovery.market_validator import MarketValidator
 
 
 class FakeGammaClient:
-    def __init__(self, payload):
+    def __init__(self, payload, *, search_payload=None):
         self.payload = payload
+        self.search_payload = search_payload if search_payload is not None else []
         self.calls: list[tuple[int | None, bool | None, bool | None]] = []
+        self.search_calls: list[tuple[str, bool | None, bool | None]] = []
 
     async def list_markets(
         self,
         *,
         limit: int = 200,
         offset: int | None = None,
+        order: str | None = None,
+        ascending: bool | None = None,
         active: bool | None = True,
         closed: bool | None = False,
     ):
-        del limit
+        del limit, order, ascending
         self.calls.append((offset, active, closed))
         if isinstance(self.payload, dict):
             return self.payload.get(offset or 0, [])
         return self.payload
+
+    async def public_search(
+        self,
+        *,
+        query: str,
+        limit: int = 200,
+        active: bool | None = True,
+        closed: bool | None = False,
+    ):
+        del limit
+        self.search_calls.append((query, active, closed))
+        if isinstance(self.search_payload, dict):
+            return self.search_payload.get(query, [])
+        return self.search_payload
 
 
 @pytest.mark.asyncio
@@ -202,3 +220,30 @@ async def test_market_finder_paginates_until_finding_btc_market() -> None:
 
     assert context.condition_id == "cond-5m"
     assert (500, True, False) in client.calls
+
+
+@pytest.mark.asyncio
+async def test_market_finder_prefers_public_search_when_available() -> None:
+    now = datetime.now(tz=timezone.utc)
+    search_payload = [
+        {
+            "question": "Bitcoin Up or Down - 5 Minutes",
+            "slug": "bitcoin-up-or-down-5-minute-1739836800",
+            "conditionId": "cond-search-5m",
+            "clobTokenIds": ["up5", "down5"],
+            "bestBid": "0.50",
+            "bestAsk": "0.52",
+            "tickSize": "0.01",
+            "resolutionSource": "Binance",
+            "startDate": now.isoformat(),
+            "endDate": (now + timedelta(minutes=5)).isoformat(),
+        }
+    ]
+
+    client = FakeGammaClient([], search_payload=search_payload)
+    finder = MarketFinder(client, MarketValidator(Settings()), target_interval="5m")
+    context = await finder.discover_next_market(now_utc=now)
+
+    assert context.condition_id == "cond-search-5m"
+    assert client.search_calls
+    assert client.calls == []

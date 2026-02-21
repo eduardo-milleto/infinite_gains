@@ -38,13 +38,23 @@ class ClobClientWrapper:
                 key=private_key,
                 creds=api_creds,
                 funder=settings.poly_funder_address,
+                signature_type=settings.poly_signature_type,
             )
         except TypeError:
-            client = ClobClient(
-                settings.poly_clob_host,
-                settings.poly_chain_id,
-                private_key,
-            )
+            try:
+                client = ClobClient(
+                    host=settings.poly_clob_host,
+                    chain_id=settings.poly_chain_id,
+                    key=private_key,
+                    creds=api_creds,
+                    funder=settings.poly_funder_address,
+                )
+            except TypeError:
+                client = ClobClient(
+                    settings.poly_clob_host,
+                    settings.poly_chain_id,
+                    private_key,
+                )
         return client
 
     async def place_limit_order(
