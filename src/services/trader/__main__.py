@@ -44,7 +44,11 @@ async def _run() -> None:
     kill_switch = KillSwitch(on_trip=on_kill_switch)
 
     validator = MarketValidator(settings)
-    market_finder = MarketFinder(gamma_client, validator)
+    market_finder = MarketFinder(
+        gamma_client,
+        validator,
+        target_interval=settings.taapi_interval,
+    )
     signal_engine = SignalEngine(settings)
     risk_engine = RiskEngine(settings, kill_switch, position_tracker)
     minimax_client = MiniMaxClient(settings)

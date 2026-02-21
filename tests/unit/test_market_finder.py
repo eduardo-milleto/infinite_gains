@@ -76,3 +76,55 @@ async def test_market_finder_accepts_hourly_slug_and_string_clob_ids() -> None:
     assert context.market_slug == "btc-up-or-down-february-21-2pm-et"
     assert context.token_id_up == "token-up"
     assert context.token_id_down == "token-down"
+
+
+@pytest.mark.asyncio
+async def test_market_finder_rejects_non_up_down_long_horizon_markets() -> None:
+    now = datetime.now(tz=timezone.utc)
+    payload = [
+        {
+            "question": "Will Bitcoin hit $1M before GTA VI?",
+            "slug": "will-bitcoin-hit-1m-before-gta-vi-872",
+            "conditionId": "cond-long",
+            "clobTokenIds": ["yes-token", "no-token"],
+            "bestBid": "0.49",
+            "bestAsk": "0.51",
+            "tickSize": "0.01",
+            "resolutionSource": "Binance",
+            "endDate": (now + timedelta(days=365)).isoformat(),
+            "tokens": [
+                {"outcome": "Yes", "token_id": "yes-token"},
+                {"outcome": "No", "token_id": "no-token"},
+            ],
+        }
+    ]
+
+    finder = MarketFinder(FakeGammaClient(payload), MarketValidator(Settings()))
+    with pytest.raises(MarketDiscoveryError):
+        await finder.discover_next_market(now_utc=now)
+
+
+@pytest.mark.asyncio
+async def test_market_finder_can_target_five_minute_contracts() -> None:
+    now = datetime.now(tz=timezone.utc)
+    payload = [
+        {
+            "question": "Bitcoin Up or Down - 5 Minutes",
+            "slug": "bitcoin-up-or-down-5-minute-1739836800",
+            "conditionId": "cond-5m",
+            "clobTokenIds": ["up5", "down5"],
+            "bestBid": "0.50",
+            "bestAsk": "0.52",
+            "tickSize": "0.01",
+            "resolutionSource": "Binance",
+            "startDate": now.isoformat(),
+            "endDate": (now + timedelta(minutes=5)).isoformat(),
+        }
+    ]
+
+    finder = MarketFinder(FakeGammaClient(payload), MarketValidator(Settings()), target_interval="5m")
+    context = await finder.discover_next_market(now_utc=now)
+
+    assert context.condition_id == "cond-5m"
+    assert context.token_id_up == "up5"
+    assert context.token_id_down == "down5"

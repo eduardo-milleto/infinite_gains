@@ -13,14 +13,24 @@ from src.services.market_discovery.market_validator import MarketValidator
 
 
 class MarketFinder:
-    _LOWER_TIMEFRAME_MARKERS = ("5 minute", "5m", "15 minute", "15m", "30 minute", "30m")
+    _LOWER_TIMEFRAME_MARKERS = ("1 minute", "1m", "5 minute", "5m", "15 minute", "15m", "30 minute", "30m")
     _UPPER_TIMEFRAME_MARKERS = ("day", "daily", "week", "weekly", "month", "monthly")
     _HOURLY_TEXT_MARKERS = ("hour", "hourly", "1h", "60 minute", "60m")
+    _UP_DOWN_MARKERS = ("up or down", "up/down")
     _SLUG_TIME_MARKER_RE = re.compile(r"(?:^|-)(?:[1-9]|1[0-2])(?:am|pm)(?:-|$)")
+    _INTERVAL_RE = re.compile(r"^\s*(\d+)\s*([mhd])\s*$", re.IGNORECASE)
 
-    def __init__(self, gamma_client: GammaClient, validator: MarketValidator) -> None:
+    def __init__(
+        self,
+        gamma_client: GammaClient,
+        validator: MarketValidator,
+        *,
+        target_interval: str = "1h",
+    ) -> None:
         self._gamma_client = gamma_client
         self._validator = validator
+        self._target_interval = target_interval.lower()
+        self._target_interval_seconds = self._parse_interval_seconds(self._target_interval)
 
     async def discover_next_market(self, *, now_utc: datetime | None = None) -> MarketContext:
         now = now_utc or datetime.now(tz=timezone.utc)
@@ -134,10 +144,19 @@ class MarketFinder:
         if "btc" not in title and "bitcoin" not in title:
             return False
 
-        if any(token in title for token in self._LOWER_TIMEFRAME_MARKERS):
+        if not self._has_up_down_semantics(market, title):
             return False
 
-        if any(token in title for token in self._HOURLY_TEXT_MARKERS):
+        if any(token in title for token in self._UPPER_TIMEFRAME_MARKERS):
+            return False
+
+        if self._target_interval_seconds >= 3600 and any(token in title for token in self._LOWER_TIMEFRAME_MARKERS):
+            return False
+
+        if self._target_interval_seconds == 3600 and any(token in title for token in self._HOURLY_TEXT_MARKERS):
+            return True
+
+        if self._target_interval_seconds == 300 and any(token in title for token in ("5 minute", "5m", "five minute")):
             return True
 
         slug = str(market.get("slug") or market.get("market_slug") or "").lower()
@@ -145,17 +164,36 @@ class MarketFinder:
             return True
 
         duration_seconds = self._extract_duration_seconds(market)
-        if duration_seconds is not None and 45 * 60 <= duration_seconds <= 75 * 60:
+        if duration_seconds is not None and self._duration_matches_target(duration_seconds):
             return True
 
-        # Fallback: current BTC up/down contracts often include wall-clock markers without the literal "hour" text.
-        has_direction_pair = ("up" in title and "down" in title) or ("yes" in title and "no" in title)
-        padded_title = f" {title} "
-        has_time_marker = " am " in padded_title or " pm " in padded_title or " et" in title or " utc" in title
-        if has_direction_pair and has_time_marker and not any(
-            marker in title for marker in self._UPPER_TIMEFRAME_MARKERS
-        ):
+        return False
+
+    def _duration_matches_target(self, duration_seconds: float) -> bool:
+        tolerance = max(60, int(self._target_interval_seconds * Decimal("0.35")))
+        min_allowed = max(60, self._target_interval_seconds - tolerance)
+        max_allowed = self._target_interval_seconds + tolerance
+        return min_allowed <= duration_seconds <= max_allowed
+
+    def _has_up_down_semantics(self, market: dict[str, Any], title: str) -> bool:
+        if any(marker in title for marker in self._UP_DOWN_MARKERS):
             return True
+
+        slug = str(market.get("slug") or market.get("market_slug") or "").lower()
+        if "up-or-down" in slug or "updown" in slug:
+            return True
+
+        tokens = market.get("tokens")
+        if isinstance(tokens, list):
+            outcomes = {
+                str(token.get("outcome") or token.get("name") or "").strip().lower()
+                for token in tokens
+                if isinstance(token, dict)
+            }
+            if {"up", "down"}.issubset(outcomes):
+                return True
+            if {"yes", "no"}.issubset(outcomes) and ("up" in title and "down" in title):
+                return True
 
         return False
 
@@ -212,13 +250,31 @@ class MarketFinder:
             return False
         if "btc" not in slug and "bitcoin" not in slug:
             return False
-        if any(token in slug for token in ("5-minute", "15-minute", "30-minute", "5m", "15m", "30m")):
+        if "up-or-down" not in slug and "updown" not in slug:
             return False
-        if any(token in slug for token in ("hour", "1h", "60m")):
+        if ("hour" in slug) or ("1h" in slug) or ("60m" in slug):
             return True
-        if ("up" in slug and "down" in slug) and MarketFinder._SLUG_TIME_MARKER_RE.search(slug):
+        if ("5-minute" in slug) or ("5m" in slug):
+            return True
+        if MarketFinder._SLUG_TIME_MARKER_RE.search(slug):
             return True
         return False
+
+    @classmethod
+    def _parse_interval_seconds(cls, interval: str) -> int:
+        match = cls._INTERVAL_RE.match(interval)
+        if not match:
+            # Fallback to 1h default if someone sets uncommon TAAPI interval format.
+            return 3600
+        amount = int(match.group(1))
+        unit = match.group(2).lower()
+        if unit == "m":
+            return amount * 60
+        if unit == "h":
+            return amount * 3600
+        if unit == "d":
+            return amount * 86400
+        return 3600
 
     def _extract_condition_id(self, market: dict[str, Any]) -> str:
         condition_id = str(market.get("conditionId") or market.get("condition_id") or "").strip()
