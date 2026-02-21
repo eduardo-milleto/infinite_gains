@@ -55,7 +55,7 @@ class TaapiClient:
                 "symbol": self._settings.taapi_symbol,
                 "interval": self._settings.taapi_interval,
                 "backtrack": backtrack,
-                "optInTimePeriod": self._settings.strategy_rsi_period,
+                "period": self._settings.strategy_rsi_period,
             },
         )
         value = payload.get("value")
@@ -72,17 +72,18 @@ class TaapiClient:
                 "symbol": self._settings.taapi_symbol,
                 "interval": self._settings.taapi_interval,
                 "backtrack": backtrack,
-                "optInFastK_Period": self._settings.strategy_stoch_k_period,
-                "optInSlowK_Period": self._settings.strategy_stoch_k_smooth,
-                "optInSlowD_Period": self._settings.strategy_stoch_d_period,
+                "kPeriod": self._settings.strategy_stoch_k_period,
+                "dPeriod": self._settings.strategy_stoch_d_period,
+                "kSmooth": self._settings.strategy_stoch_k_smooth,
             },
         )
 
-        k_value = payload.get("valueFastK")
-        d_value = payload.get("valueFastD")
+        k_value = payload.get("valueK")
+        d_value = payload.get("valueD")
         if k_value is None or d_value is None:
-            k_value = payload.get("valueK")
-            d_value = payload.get("valueD")
+            # Backward compatibility with older response naming.
+            k_value = payload.get("valueFastK")
+            d_value = payload.get("valueFastD")
         if k_value is None or d_value is None:
             raise APIFailureError("TAAPI stochastic response missing K/D values")
         return Decimal(str(k_value)), Decimal(str(d_value))
