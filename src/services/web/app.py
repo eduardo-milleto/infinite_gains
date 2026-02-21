@@ -16,6 +16,7 @@ from src.core.enums import OrderStatus, ProposalStatus
 from src.db.engine import Database
 from src.db.models import AIDecisionModel, MarketSessionModel, SignalModel, TradeModel
 from src.db.repository import ConfigRepo
+from src.services.web.polymarket_wallet_client import PolymarketWalletClient
 
 OPEN_STATUSES = {
     OrderStatus.SUBMITTED.value,
@@ -27,6 +28,7 @@ OPEN_STATUSES = {
 def create_app() -> FastAPI:
     settings = get_settings()
     database = Database(settings)
+    wallet_client = PolymarketWalletClient(settings)
 
     app = FastAPI(title="Infinite Gains Web API", version="1.0.0")
     app.add_middleware(
@@ -40,6 +42,7 @@ def create_app() -> FastAPI:
 
     @app.on_event("shutdown")
     async def _shutdown() -> None:
+        await wallet_client.close()
         await database.dispose()
 
     @app.get("/health")
@@ -48,14 +51,18 @@ def create_app() -> FastAPI:
 
     @app.get("/api/status")
     async def status() -> dict[str, Any]:
-        return await _build_dashboard_snapshot(settings=settings, database=database)
+        return await _build_dashboard_snapshot(settings=settings, database=database, wallet_client=wallet_client)
 
     @app.websocket("/ws")
     async def ws_status(websocket: WebSocket) -> None:
         await websocket.accept()
         try:
             while True:
-                payload = await _build_dashboard_snapshot(settings=settings, database=database)
+                payload = await _build_dashboard_snapshot(
+                    settings=settings,
+                    database=database,
+                    wallet_client=wallet_client,
+                )
                 await websocket.send_json(payload)
                 await asyncio.sleep(5)
         except (WebSocketDisconnect, RuntimeError):
@@ -64,11 +71,17 @@ def create_app() -> FastAPI:
     return app
 
 
-async def _build_dashboard_snapshot(*, settings: Settings, database: Database) -> dict[str, Any]:
+async def _build_dashboard_snapshot(
+    *,
+    settings: Settings,
+    database: Database,
+    wallet_client: PolymarketWalletClient,
+) -> dict[str, Any]:
     now = utc_now()
     interval_seconds = max(60, interval_to_seconds(settings.taapi_interval))
     today_start = datetime.combine(now.date(), time.min, tzinfo=timezone.utc)
     today_end = datetime.combine(now.date(), time.max, tzinfo=timezone.utc)
+    wallet_snapshot = await wallet_client.fetch_snapshot()
 
     async with database.session() as session:
         latest_signal = await _latest_signal(session)
@@ -172,6 +185,7 @@ async def _build_dashboard_snapshot(*, settings: Settings, database: Database) -
             "downPriceCents": round(max(0.0, 100 - (position_payload["currentPrice"] * 100)), 4),
             "resolutionSource": latest_market.resolution_source if latest_market is not None else "n/a",
         },
+        "wallet": wallet_snapshot,
         "pnlSeries": _pnl_series(pnl_trades=pnl_trades),
         "tradeLog": [_trade_row_payload(row) for row in recent_trades],
         "systemLogs": _system_logs(now=now, latest_signal=latest_signal, latest_ai=latest_ai, latest_trade=latest_trade),

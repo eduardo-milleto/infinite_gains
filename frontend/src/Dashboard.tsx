@@ -98,6 +98,31 @@ interface MarketState {
   resolutionSource: string;
 }
 
+interface WalletPosition {
+  slug: string;
+  outcome: string;
+  size: number;
+  avgPrice: number;
+  currentPrice: number;
+  currentValueUsdc: number;
+  cashPnlUsdc: number;
+  percentPnl: number;
+  updatedAt: string;
+  isClosed: boolean;
+}
+
+interface WalletState {
+  address: string;
+  cashUsdc: number | null;
+  holdingsValueUsdc: number;
+  totalValueUsdc: number;
+  openPositionsCount: number;
+  openPositions: WalletPosition[];
+  closedPositions: WalletPosition[];
+  updatedAt: string;
+  source: string;
+}
+
 interface TradeRow {
   time: string;
   direction: 'UP' | 'DOWN';
@@ -125,6 +150,7 @@ interface DashboardState {
   signal: SignalState;
   ai: AiState;
   market: MarketState;
+  wallet: WalletState;
   pnlSeries: PnlPoint[];
   tradeLog: TradeRow[];
   systemLogs: string[];
@@ -218,6 +244,17 @@ const MOCK_DASHBOARD: DashboardState = {
     upPriceCents: 52,
     downPriceCents: 47.8,
     resolutionSource: 'Binance BTC/USDT',
+  },
+  wallet: {
+    address: '0x0000000000000000000000000000000000000000',
+    cashUsdc: 0,
+    holdingsValueUsdc: 0,
+    totalValueUsdc: 0,
+    openPositionsCount: 0,
+    openPositions: [],
+    closedPositions: [],
+    updatedAt: new Date().toISOString(),
+    source: 'mock',
   },
   pnlSeries: [
     { time: 'D-7 00:00', pnl: -1.1 },
@@ -366,6 +403,13 @@ function formatDollar(value: number): string {
   return `${value >= 0 ? '+' : '-'}$${Math.abs(value).toFixed(2)}`;
 }
 
+function formatMoney(value: number | null): string {
+  if (value === null || Number.isNaN(value)) {
+    return 'n/a';
+  }
+  return `$${value.toFixed(2)}`;
+}
+
 function formatPrice(value: number): string {
   return `$${value.toFixed(2)}`;
 }
@@ -409,6 +453,7 @@ function deepMergeDashboard(prev: DashboardState, incoming: Partial<DashboardSta
     signal: { ...prev.signal, ...(incoming.signal ?? {}) },
     ai: { ...prev.ai, ...(incoming.ai ?? {}) },
     market: { ...prev.market, ...(incoming.market ?? {}) },
+    wallet: { ...prev.wallet, ...(incoming.wallet ?? {}) },
     pnlSeries: incoming.pnlSeries ?? prev.pnlSeries,
     tradeLog: incoming.tradeLog ?? prev.tradeLog,
     systemLogs: incoming.systemLogs ?? prev.systemLogs,
@@ -671,27 +716,6 @@ export function Dashboard({ onLogout, onNavigate }: DashboardProps) {
       setLastTickFlash(true);
       window.setTimeout(() => setLastTickFlash(false), 650);
     }, 60_000);
-
-    return () => window.clearInterval(timer);
-  }, []);
-
-  useEffect(() => {
-    const pricePulse = [0.56, 0.559, 0.561, 0.562, 0.558, 0.56];
-    let idx = 0;
-
-    const timer = window.setInterval(() => {
-      idx = (idx + 1) % pricePulse.length;
-      const nextPrice = pricePulse[idx];
-
-      setState((prev) => ({
-        ...prev,
-        position: {
-          ...prev.position,
-          currentPrice: nextPrice,
-          unrealizedPnl: Number(((nextPrice - prev.position.entryPrice) * 19.25).toFixed(2)),
-        },
-      }));
-    }, 4200);
 
     return () => window.clearInterval(timer);
   }, []);
@@ -1463,6 +1487,82 @@ export function Dashboard({ onLogout, onNavigate }: DashboardProps) {
 
           <div className="border border-[#0D2137] bg-[#050A0F] p-2 font-['JetBrains_Mono'] text-[11px] text-[#8BA8C4]">
             Resolution source: <span className="text-[#E0F4FF]">{state.market.resolutionSource}</span>
+          </div>
+        </div>
+      </HudPanel>
+
+      <HudPanel
+        title="POLYMARKET WALLET — LIVE"
+        className="min-h-[240px] flex-1"
+        right={<span className="font-['JetBrains_Mono'] text-[10px] text-[#8BA8C4]">{state.wallet.source}</span>}
+      >
+        <div className="flex h-full min-h-0 flex-col gap-2 text-xs text-[#8BA8C4]">
+          <div className="border border-[#0D2137] bg-[#050A0F] p-2 font-['JetBrains_Mono'] text-[11px]">
+            <p className="truncate">
+              Wallet: <span className="text-[#E0F4FF]">{state.wallet.address}</span>
+            </p>
+            <p className="mt-1">
+              Updated: <span className="text-[#E0F4FF]">{state.wallet.updatedAt || 'n/a'}</span>
+            </p>
+          </div>
+
+          <div className="grid grid-cols-3 gap-2">
+            <div className="border border-[#0D2137] bg-[#050A0F] p-2">
+              <p className="uppercase tracking-[0.14em]">Cash</p>
+              <p className="mt-1 font-['JetBrains_Mono'] text-[#E0F4FF]">{formatMoney(state.wallet.cashUsdc)}</p>
+            </div>
+            <div className="border border-[#0D2137] bg-[#050A0F] p-2">
+              <p className="uppercase tracking-[0.14em]">Holdings</p>
+              <p className="mt-1 font-['JetBrains_Mono'] text-[#E0F4FF]">{formatMoney(state.wallet.holdingsValueUsdc)}</p>
+            </div>
+            <div className="border border-[#0D2137] bg-[#050A0F] p-2">
+              <p className="uppercase tracking-[0.14em]">Total</p>
+              <p className="mt-1 font-['JetBrains_Mono'] text-[#00FF88]">{formatMoney(state.wallet.totalValueUsdc)}</p>
+            </div>
+          </div>
+
+          <div className="border border-[#0D2137] bg-[#050A0F] p-2">
+            <p className="uppercase tracking-[0.14em]">
+              Open positions: <span className="text-[#E0F4FF]">{state.wallet.openPositionsCount}</span>
+            </p>
+            <div className="mt-1 max-h-24 overflow-auto font-['JetBrains_Mono'] text-[10px]">
+              {state.wallet.openPositions.length === 0 ? (
+                <p className="text-[#8BA8C4]">No open positions from Polymarket API.</p>
+              ) : (
+                state.wallet.openPositions.slice(0, 4).map((row, idx) => (
+                  <div key={`${row.slug}-${idx}`} className="mb-1 border border-[#0D2137] bg-[#020408] px-2 py-1">
+                    <p className="truncate text-[#E0F4FF]">{row.slug}</p>
+                    <p>
+                      {row.outcome} · value {formatMoney(row.currentValueUsdc)} · pnl{' '}
+                      <span style={{ color: row.cashPnlUsdc >= 0 ? COLORS.green : COLORS.red }}>
+                        {formatDollar(row.cashPnlUsdc)}
+                      </span>
+                    </p>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+
+          <div className="min-h-0 flex-1 border border-[#0D2137] bg-[#050A0F] p-2">
+            <p className="uppercase tracking-[0.14em]">Position history</p>
+            <div className="mt-1 max-h-24 overflow-auto font-['JetBrains_Mono'] text-[10px]">
+              {state.wallet.closedPositions.length === 0 ? (
+                <p className="text-[#8BA8C4]">No closed positions yet.</p>
+              ) : (
+                state.wallet.closedPositions.slice(0, 5).map((row, idx) => (
+                  <div key={`${row.slug}-closed-${idx}`} className="mb-1 border border-[#0D2137] bg-[#020408] px-2 py-1">
+                    <p className="truncate text-[#E0F4FF]">{row.slug}</p>
+                    <p>
+                      {row.outcome} · pnl{' '}
+                      <span style={{ color: row.cashPnlUsdc >= 0 ? COLORS.green : COLORS.red }}>
+                        {formatDollar(row.cashPnlUsdc)}
+                      </span>
+                    </p>
+                  </div>
+                ))
+              )}
+            </div>
           </div>
         </div>
       </HudPanel>
