@@ -103,11 +103,12 @@ class TraderService:
         KILL_SWITCH_ACTIVE.set(1 if self._kill_switch.is_tripped else 0)
 
         try:
-            market_context = await self._market_finder.discover_next_market(now_utc=now_utc)
+            market_candidates = await self._market_finder.discover_candidate_markets(now_utc=now_utc, limit=20)
         except MarketDiscoveryError as exc:
             API_ERRORS_TOTAL.inc()
             await self._trip_kill_switch(f"Market discovery failure: {exc}")
             raise
+        market_context = market_candidates[0]
 
         try:
             fetch_started = perf_counter()
@@ -120,6 +121,15 @@ class TraderService:
 
         signal = self._signal_engine.evaluate(snapshot)
         SIGNALS_EVALUATED.inc()
+        if signal.signal_type != SignalType.NONE and self._decision_engine is not None and len(market_candidates) > 1:
+            try:
+                market_context = await self._decision_engine.select_market(
+                    signal=signal,
+                    candidates=market_candidates,
+                    now_utc=now_utc,
+                )
+            except Exception as exc:
+                logger.warning("market_selection_fallback", error=str(exc), selected=market_context.market_slug)
 
         async with self._database.session() as session:
             signal_repo = SignalRepo(session)

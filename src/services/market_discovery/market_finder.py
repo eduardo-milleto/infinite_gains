@@ -14,6 +14,9 @@ from src.services.market_discovery.market_validator import MarketValidator
 
 
 class MarketFinder:
+    _PAGE_LIMIT = 500
+    _MAX_SCAN_PAGES = 8
+    _MAX_CANDIDATES_BUFFER = 80
     _LOWER_TIMEFRAME_MARKERS = ("1 minute", "1m", "5 minute", "5m", "15 minute", "15m", "30 minute", "30m")
     _UPPER_TIMEFRAME_MARKERS = ("day", "daily", "week", "weekly", "month", "monthly")
     _HOURLY_TEXT_MARKERS = ("hour", "hourly", "1h", "60 minute", "60m")
@@ -33,14 +36,21 @@ class MarketFinder:
         self._target_interval_seconds = interval_to_seconds(self._target_interval)
 
     async def discover_next_market(self, *, now_utc: datetime | None = None) -> MarketContext:
+        candidates = await self.discover_candidate_markets(now_utc=now_utc, limit=1)
+        return candidates[0]
+
+    async def discover_candidate_markets(
+        self,
+        *,
+        now_utc: datetime | None = None,
+        limit: int = 20,
+    ) -> list[MarketContext]:
         now = now_utc or datetime.now(tz=timezone.utc)
-        markets = await self._gamma_client.list_markets(limit=500, active=True, closed=False)
-        candidates = self._extract_candidates(markets, now_utc=now)
+        candidates, markets = await self._scan_markets(now_utc=now, active=True, closed=False)
 
         if not candidates:
             # Fallback query: some Gamma payloads omit `active` semantics for intraday contracts.
-            fallback_markets = await self._gamma_client.list_markets(limit=500, active=None, closed=False)
-            candidates = self._extract_candidates(fallback_markets, now_utc=now)
+            candidates, fallback_markets = await self._scan_markets(now_utc=now, active=None, closed=False)
             if fallback_markets:
                 markets = fallback_markets
 
@@ -52,9 +62,54 @@ class MarketFinder:
             )
 
         candidates.sort(key=lambda item: item.market_end_time)
-        chosen = candidates[0]
-        self._validator.validate(chosen, now_utc=now)
-        return chosen
+        validated: list[MarketContext] = []
+        last_validation_error: str | None = None
+        for candidate in candidates:
+            try:
+                self._validator.validate(candidate, now_utc=now)
+                validated.append(candidate)
+            except MarketDiscoveryError as exc:
+                last_validation_error = str(exc)
+
+        if not validated:
+            sample = ", ".join(self._sample_market_names(markets))
+            hint = f" last_validation_error={last_validation_error}" if last_validation_error else ""
+            raise MarketDiscoveryError(
+                f"No valid BTC up/down market found for interval={self._target_interval}"
+                f"{f' (sample={sample})' if sample else ''}{hint}"
+            )
+
+        return validated[: max(1, limit)]
+
+    async def _scan_markets(
+        self,
+        *,
+        now_utc: datetime,
+        active: bool | None,
+        closed: bool | None,
+    ) -> tuple[list[MarketContext], list[dict[str, Any]]]:
+        scanned: list[dict[str, Any]] = []
+        candidates: list[MarketContext] = []
+        for page in range(self._MAX_SCAN_PAGES):
+            offset = page * self._PAGE_LIMIT
+            batch = await self._gamma_client.list_markets(
+                limit=self._PAGE_LIMIT,
+                offset=offset,
+                active=active,
+                closed=closed,
+            )
+            if not batch:
+                break
+
+            scanned.extend(batch)
+            candidates.extend(self._extract_candidates(batch, now_utc=now_utc))
+            if len(candidates) >= self._MAX_CANDIDATES_BUFFER:
+                break
+
+            if len(batch) < self._PAGE_LIMIT:
+                break
+
+        return candidates, scanned
 
     def _extract_candidates(self, markets: list[dict[str, Any]], *, now_utc: datetime) -> list[MarketContext]:
         candidates: list[MarketContext] = []

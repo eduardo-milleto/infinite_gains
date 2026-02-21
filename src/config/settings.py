@@ -72,6 +72,7 @@ class Settings(BaseSettings):
     minimax_api_key: SecretStr = Field(default=SecretStr(""), repr=False)
     minimax_model: str = "MiniMax-Text-01"
     minimax_enabled: bool = False
+    ai_market_selection_enabled: bool = True
     minimax_api_base_url: str = "https://api.minimax.chat/v1"
     ai_fallback_mode: AIFallbackMode = AIFallbackMode.VETO
     ai_min_edge: Decimal = Decimal("0.05")
@@ -145,6 +146,7 @@ class Settings(BaseSettings):
     def snapshot_ai(self) -> dict[str, str]:
         return {
             "minimax_enabled": str(self.minimax_enabled),
+            "ai_market_selection_enabled": str(self.ai_market_selection_enabled),
             "minimax_model": self.minimax_model,
             "ai_fallback_mode": self.ai_fallback_mode.value,
             "ai_min_edge": str(self.ai_min_edge),
