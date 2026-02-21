@@ -8,7 +8,7 @@ from decimal import Decimal
 import structlog
 
 from src.config.settings import Settings
-from src.core.clock import utc_now
+from src.core.clock import interval_to_seconds, utc_now
 from src.core.enums import ExitMode, OrderStatus, TradeDirection
 from src.core.types import ExitParameters
 from src.db.engine import Database
@@ -46,6 +46,7 @@ class PositionMonitor:
         self._on_exit_callback = on_exit_callback
         self._alert_callback = alert_callback
         self._tasks: dict[int, asyncio.Task[None]] = {}
+        self._scaled_in_trade_ids: set[int] = set()
 
     def set_on_exit_callback(self, callback: OnExitCallback | None) -> None:
         self._on_exit_callback = callback
@@ -81,6 +82,7 @@ class PositionMonitor:
             except asyncio.CancelledError:
                 pass
         self._tasks.clear()
+        self._scaled_in_trade_ids.clear()
 
     async def _run_loop(
         self,
@@ -101,7 +103,18 @@ class PositionMonitor:
                 }:
                     return
 
+                now_utc = utc_now()
                 current_price = await self._order_manager.get_token_price(trade.token_id)
+                scaled_in = await self._maybe_scale_in(
+                    trade_id=trade_id,
+                    trade=trade,
+                    current_price=current_price,
+                    now_utc=now_utc,
+                )
+                if scaled_in:
+                    await asyncio.sleep(self._settings.position_monitor_interval_secs)
+                    continue
+
                 reversal = False
                 if exit_parameters.exit_on_signal_reversal:
                     reversal = await self._detect_reversal(trade.direction)
@@ -110,7 +123,7 @@ class PositionMonitor:
                     trade=trade,
                     current_price=current_price,
                     market_end_time=market_end_time,
-                    now_utc=utc_now(),
+                    now_utc=now_utc,
                     exit_parameters=exit_parameters,
                     reversal_detected=reversal,
                 )
@@ -128,6 +141,7 @@ class PositionMonitor:
                 await asyncio.sleep(self._settings.position_monitor_interval_secs)
         finally:
             self._tasks.pop(trade_id, None)
+            self._scaled_in_trade_ids.discard(trade_id)
 
     async def _load_trade(self, trade_id: int):
         async with self._database.session() as session:
@@ -198,3 +212,85 @@ class PositionMonitor:
             price_exit=str(current_price),
             pnl_usdc=str(pnl_usdc),
         )
+
+    async def _maybe_scale_in(
+        self,
+        *,
+        trade_id: int,
+        trade,
+        current_price: Decimal,
+        now_utc: datetime,
+    ) -> bool:
+        if not self._settings.scale_in_enabled:
+            return False
+        if interval_to_seconds(self._settings.taapi_interval) != 300:
+            return False
+        if trade_id in self._scaled_in_trade_ids:
+            return False
+
+        elapsed = int((now_utc - trade.candle_open_utc).total_seconds())
+        if elapsed < 0 or elapsed > self._settings.scale_in_window_secs:
+            return False
+
+        entry_price = Decimal(str(trade.price_entry if trade.price_entry is not None else trade.price))
+        if entry_price <= 0 or current_price <= 0:
+            return False
+
+        drop_cents = (entry_price - current_price) * Decimal("100")
+        if drop_cents < Decimal(str(self._settings.scale_in_trigger_drop_cents)):
+            return False
+
+        current_size = Decimal(str(trade.size_usdc))
+        max_position = Decimal(str(self._settings.risk_max_position_usdc))
+        remaining = max_position - current_size
+        if remaining <= 0:
+            return False
+
+        requested = current_size * Decimal(str(self._settings.scale_in_size_multiplier))
+        add_size = min(requested, remaining)
+        if add_size <= 0:
+            return False
+
+        order_result = await self._order_manager.place_scale_in_order(
+            trade=trade,
+            entry_price=current_price,
+            size_usdc=add_size,
+        )
+        if order_result.status != OrderStatus.SUBMITTED:
+            logger.warning(
+                "scale_in_order_not_submitted",
+                trade_id=trade_id,
+                status=order_result.status.value,
+                reason=order_result.failure_reason,
+            )
+            return False
+
+        async with self._database.session() as session:
+            repo = TradeRepo(session)
+            updated = await repo.apply_scale_in(
+                trade_id=trade_id,
+                added_size_usdc=add_size,
+                added_price=current_price,
+                added_order_id=order_result.order_id,
+                raw_response=order_result.raw_response,
+                scaled_at=now_utc,
+            )
+
+        if updated is None:
+            return False
+
+        self._scaled_in_trade_ids.add(trade_id)
+        logger.info(
+            "scale_in_executed",
+            trade_id=trade_id,
+            added_size_usdc=str(add_size),
+            scale_in_price=str(current_price),
+            new_size_usdc=str(updated.size_usdc),
+            new_entry_price=str(updated.price_entry),
+        )
+        if self._alert_callback is not None:
+            await self._alert_callback(
+                f"Scale-in executed trade_id={trade_id} add={add_size} "
+                f"price={current_price} new_avg={updated.price_entry}"
+            )
+        return True

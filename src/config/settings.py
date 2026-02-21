@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     trading_mode: TradingMode = TradingMode.PAPER
 
     risk_max_trade_usdc: Decimal = Decimal("10.00")
+    risk_max_position_usdc: Decimal = Decimal("20.00")
     risk_max_daily_loss_usdc: Decimal = Decimal("15.00")
     risk_max_trades_per_day: int = 6
     risk_max_open_positions: int = 1
@@ -89,6 +90,10 @@ class Settings(BaseSettings):
     exit_min_stop_cents: int = 3
     exit_max_stop_cents: int = 15
     position_monitor_interval_secs: int = 30
+    scale_in_enabled: bool = True
+    scale_in_window_secs: int = 60
+    scale_in_trigger_drop_cents: int = 20
+    scale_in_size_multiplier: Decimal = Decimal("1.0")
 
     openclaw_enabled: bool = False
     openclaw_schedule_hours: int = 6
@@ -130,6 +135,7 @@ class Settings(BaseSettings):
     def snapshot_risk(self) -> dict[str, str]:
         return {
             "max_trade_usdc": str(self.risk_max_trade_usdc),
+            "max_position_usdc": str(self.risk_max_position_usdc),
             "max_daily_loss_usdc": str(self.risk_max_daily_loss_usdc),
             "max_trades_per_day": str(self.risk_max_trades_per_day),
             "max_open_positions": str(self.risk_max_open_positions),
@@ -160,6 +166,10 @@ class Settings(BaseSettings):
             "exit_min_stop_cents": str(self.exit_min_stop_cents),
             "exit_max_stop_cents": str(self.exit_max_stop_cents),
             "position_monitor_interval_secs": str(self.position_monitor_interval_secs),
+            "scale_in_enabled": str(self.scale_in_enabled),
+            "scale_in_window_secs": str(self.scale_in_window_secs),
+            "scale_in_trigger_drop_cents": str(self.scale_in_trigger_drop_cents),
+            "scale_in_size_multiplier": str(self.scale_in_size_multiplier),
         }
 
 

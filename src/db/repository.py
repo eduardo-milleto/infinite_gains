@@ -201,6 +201,54 @@ class TradeRepo:
     async def get_by_id(self, trade_id: int) -> TradeModel | None:
         return await self.session.get(TradeModel, trade_id)
 
+    async def apply_scale_in(
+        self,
+        *,
+        trade_id: int,
+        added_size_usdc: Decimal,
+        added_price: Decimal,
+        added_order_id: str | None,
+        raw_response: dict[str, object] | None = None,
+        scaled_at: datetime | None = None,
+    ) -> TradeModel | None:
+        row = await self.session.get(TradeModel, trade_id)
+        if row is None:
+            return None
+
+        current_size = Decimal(str(row.size_usdc))
+        current_entry = Decimal(str(row.price_entry if row.price_entry is not None else row.price))
+        added_size = Decimal(str(added_size_usdc))
+        added_entry = Decimal(str(added_price))
+        if added_size <= 0:
+            return row
+
+        new_size = current_size + added_size
+        new_entry = ((current_entry * current_size) + (added_entry * added_size)) / new_size
+        row.size_usdc = new_size
+        row.price_entry = new_entry
+
+        payload: dict[str, object] = dict(row.raw_order_response or {})
+        scale_ins_raw = payload.get("scale_ins")
+        scale_ins: list[dict[str, object]]
+        if isinstance(scale_ins_raw, list):
+            scale_ins = [item for item in scale_ins_raw if isinstance(item, dict)]
+        else:
+            scale_ins = []
+        scale_ins.append(
+            {
+                "order_id": added_order_id,
+                "size_usdc": str(added_size),
+                "price": str(added_entry),
+                "scaled_at": (scaled_at or datetime.now(timezone.utc)).isoformat(),
+                "raw_response": raw_response or {},
+            }
+        )
+        payload["scale_ins"] = scale_ins
+        payload["entry_count"] = 1 + len(scale_ins)
+        row.raw_order_response = payload
+        await self.session.flush()
+        return row
+
     async def list_open_positions(self) -> list[TradeModel]:
         query = select(TradeModel).where(
             TradeModel.status.in_(

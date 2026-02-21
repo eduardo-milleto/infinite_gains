@@ -61,5 +61,21 @@ class OrderManager:
             side="SELL",
         )
 
+    async def place_scale_in_order(
+        self,
+        *,
+        trade: TradeModel,
+        entry_price: Decimal,
+        size_usdc: Decimal,
+    ) -> OrderResult:
+        direction = TradeDirection(trade.direction)
+        return await self._client.place_limit_order(
+            direction=direction,
+            token_id=trade.token_id,
+            price=entry_price,
+            size_usdc=size_usdc,
+            side="BUY",
+        )
+
     async def get_token_price(self, token_id: str) -> Decimal:
         return await self._client.get_token_price(token_id)
