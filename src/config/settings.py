@@ -102,6 +102,8 @@ class Settings(BaseSettings):
             return value
         if isinstance(value, list):
             return tuple(int(item) for item in value)
+        if isinstance(value, int):
+            return (value,)
         if isinstance(value, str):
             raw = [item.strip() for item in value.split(",") if item.strip()]
             return tuple(int(item) for item in raw)
