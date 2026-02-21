@@ -1021,8 +1021,9 @@ export function Dashboard({ onLogout, onNavigate }: DashboardProps) {
           </span>
         }
       >
-        <ResponsiveContainer width="100%" height="100%">
-          <AreaChart data={state.pnlSeries} margin={{ top: 8, right: 12, left: 4, bottom: 8 }}>
+        <div className="h-[290px] w-full min-h-0 xl:h-full">
+          <ResponsiveContainer width="100%" height="100%">
+            <AreaChart data={state.pnlSeries} margin={{ top: 8, right: 12, left: 4, bottom: 8 }}>
             <defs>
               <linearGradient id="pnlFill" x1="0" y1="0" x2="0" y2="1">
                 <stop offset="0%" stopColor={totalPnl >= 0 ? COLORS.cyan : COLORS.red} stopOpacity={0.4} />
@@ -1053,13 +1054,14 @@ export function Dashboard({ onLogout, onNavigate }: DashboardProps) {
             />
 
             <ReferenceLine y={0} stroke={COLORS.text} strokeDasharray="3 4" />
-            <Area
-              type="monotone"
-              dataKey="pnl"
-              stroke={totalPnl >= 0 ? COLORS.cyan : COLORS.red}
-              strokeWidth={2}
-              fill="url(#pnlFill)"
-              dot={(props) => {
+              <Area
+                type="monotone"
+                dataKey="pnl"
+                stroke={totalPnl >= 0 ? COLORS.cyan : COLORS.red}
+                strokeWidth={2}
+                fill="url(#pnlFill)"
+                isAnimationActive={false}
+                dot={(props) => {
                 const point = props.payload as PnlPoint;
                 if (!point.trade) return <></>;
                 return (
@@ -1074,10 +1076,11 @@ export function Dashboard({ onLogout, onNavigate }: DashboardProps) {
                   />
                 );
               }}
-              activeDot={{ r: 5, stroke: COLORS.bright, strokeWidth: 1 }}
-            />
-          </AreaChart>
-        </ResponsiveContainer>
+                activeDot={{ r: 5, stroke: COLORS.bright, strokeWidth: 1 }}
+              />
+            </AreaChart>
+          </ResponsiveContainer>
+        </div>
       </HudPanel>
 
       <HudPanel
@@ -1117,7 +1120,14 @@ export function Dashboard({ onLogout, onNavigate }: DashboardProps) {
                 <div className="h-[95px] border border-[#0D2137] bg-[#020408] p-1">
                   <ResponsiveContainer width="100%" height="100%">
                     <LineChart data={state.signal.rsiSeries.map((value, index) => ({ i: index, value }))}>
-                      <Line type="monotone" dataKey="value" stroke={COLORS.cyan} dot={false} strokeWidth={2} />
+                      <Line
+                        type="monotone"
+                        dataKey="value"
+                        stroke={COLORS.cyan}
+                        dot={false}
+                        strokeWidth={2}
+                        isAnimationActive={false}
+                      />
                     </LineChart>
                   </ResponsiveContainer>
                 </div>
@@ -1143,8 +1153,22 @@ export function Dashboard({ onLogout, onNavigate }: DashboardProps) {
                     d: state.signal.stochDSeries[index] ?? state.signal.stochD,
                   }))}
                 >
-                  <Line type="monotone" dataKey="k" stroke={COLORS.green} strokeWidth={2} dot={false} />
-                  <Line type="monotone" dataKey="d" stroke={COLORS.amber} strokeWidth={2} dot={false} />
+                  <Line
+                    type="monotone"
+                    dataKey="k"
+                    stroke={COLORS.green}
+                    strokeWidth={2}
+                    dot={false}
+                    isAnimationActive={false}
+                  />
+                  <Line
+                    type="monotone"
+                    dataKey="d"
+                    stroke={COLORS.amber}
+                    strokeWidth={2}
+                    dot={false}
+                    isAnimationActive={false}
+                  />
                 </LineChart>
               </ResponsiveContainer>
             </div>
@@ -1363,7 +1387,7 @@ export function Dashboard({ onLogout, onNavigate }: DashboardProps) {
             </p>
           </div>
 
-          <div className="border border-[#0D2137] bg-[#050A0F] p-1">
+          <div className="h-[140px] border border-[#0D2137] bg-[#050A0F] p-1">
             <ResponsiveContainer width="100%" height="100%">
               <PieChart>
                 <Pie
@@ -1375,6 +1399,7 @@ export function Dashboard({ onLogout, onNavigate }: DashboardProps) {
                   innerRadius={26}
                   outerRadius={42}
                   stroke="none"
+                  isAnimationActive={false}
                 >
                   <Cell fill={COLORS.green} />
                   <Cell fill={COLORS.red} />
@@ -1451,7 +1476,10 @@ export function Dashboard({ onLogout, onNavigate }: DashboardProps) {
   );
 
   return (
-    <div className="relative h-[100dvh] overflow-hidden bg-[#020408] text-[#E0F4FF]" style={{ fontFamily: 'Inter, sans-serif' }}>
+    <div
+      className="relative overflow-hidden bg-[#020408] text-[#E0F4FF]"
+      style={{ fontFamily: 'Inter, sans-serif', height: '100vh' }}
+    >
       <style>{`@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Orbitron:wght@500;700;900&display=swap');`}</style>
 
       <div className="pointer-events-none absolute inset-0 opacity-20" style={{ backgroundImage: noiseTexture }} />
