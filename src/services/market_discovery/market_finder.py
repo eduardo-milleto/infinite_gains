@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import re
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
@@ -11,71 +13,80 @@ from src.services.market_discovery.market_validator import MarketValidator
 
 
 class MarketFinder:
+    _LOWER_TIMEFRAME_MARKERS = ("5 minute", "5m", "15 minute", "15m", "30 minute", "30m")
+    _UPPER_TIMEFRAME_MARKERS = ("day", "daily", "week", "weekly", "month", "monthly")
+    _HOURLY_TEXT_MARKERS = ("hour", "hourly", "1h", "60 minute", "60m")
+    _SLUG_TIME_MARKER_RE = re.compile(r"(?:^|-)(?:[1-9]|1[0-2])(?:am|pm)(?:-|$)")
+
     def __init__(self, gamma_client: GammaClient, validator: MarketValidator) -> None:
         self._gamma_client = gamma_client
         self._validator = validator
 
     async def discover_next_market(self, *, now_utc: datetime | None = None) -> MarketContext:
         now = now_utc or datetime.now(tz=timezone.utc)
-        markets = await self._gamma_client.list_markets(limit=300)
-
-        candidates: list[MarketContext] = []
-        for market in markets:
-            context = self._to_market_context(market)
-            if context is None:
-                continue
-            if context.market_end_time <= now:
-                continue
-            candidates.append(context)
+        markets = await self._gamma_client.list_markets(limit=500, active=True, closed=False)
+        candidates = self._extract_candidates(markets, now_utc=now)
 
         if not candidates:
-            raise MarketDiscoveryError("No active BTC hourly market found")
+            # Fallback query: some Gamma payloads omit `active` semantics for intraday contracts.
+            fallback_markets = await self._gamma_client.list_markets(limit=500, active=None, closed=False)
+            candidates = self._extract_candidates(fallback_markets, now_utc=now)
+            if fallback_markets:
+                markets = fallback_markets
+
+        if not candidates:
+            sample = ", ".join(self._sample_market_names(markets))
+            raise MarketDiscoveryError(
+                f"No active BTC hourly market found{f' (sample={sample})' if sample else ''}"
+            )
 
         candidates.sort(key=lambda item: item.market_end_time)
         chosen = candidates[0]
         self._validator.validate(chosen, now_utc=now)
         return chosen
 
+    def _extract_candidates(self, markets: list[dict[str, Any]], *, now_utc: datetime) -> list[MarketContext]:
+        candidates: list[MarketContext] = []
+        for market in markets:
+            context = self._to_market_context(market)
+            if context is None:
+                continue
+            if context.market_end_time <= now_utc:
+                continue
+            candidates.append(context)
+        return candidates
+
+    @staticmethod
+    def _sample_market_names(markets: list[dict[str, Any]], *, limit: int = 5) -> tuple[str, ...]:
+        names: list[str] = []
+        for market in markets:
+            candidate = str(market.get("slug") or market.get("question") or market.get("title") or "").strip()
+            if candidate:
+                names.append(candidate)
+            if len(names) >= limit:
+                break
+        return tuple(names)
+
     def _to_market_context(self, market: dict[str, Any]) -> MarketContext | None:
-        title = str(market.get("question") or market.get("title") or market.get("slug") or "").lower()
+        title = self._build_market_text_blob(market)
         if not self._is_target_btc_hourly_market(market, title):
             return None
 
-        condition_id = str(market.get("conditionId") or market.get("condition_id") or "")
-        slug = str(market.get("slug") or "")
-        market_end_time_raw = market.get("endDate") or market.get("end_date") or market.get("endTime")
-        if not condition_id or not slug or not market_end_time_raw:
+        condition_id = self._extract_condition_id(market)
+        slug = str(market.get("slug") or market.get("market_slug") or market.get("id") or condition_id)
+        market_end_time_raw = self._extract_market_end_time_raw(market)
+        if not condition_id or not slug or market_end_time_raw is None:
             return None
 
-        market_end_time = self._parse_datetime(str(market_end_time_raw))
+        market_end_time = self._parse_datetime(market_end_time_raw)
 
-        tokens = market.get("tokens")
-        token_id_up = ""
-        token_id_down = ""
-        if isinstance(tokens, list):
-            for token in tokens:
-                if not isinstance(token, dict):
-                    continue
-                outcome = str(token.get("outcome") or token.get("name") or "").lower()
-                token_id = str(token.get("token_id") or token.get("tokenId") or token.get("id") or "")
-                if outcome in {"yes", "up", "higher"} and token_id:
-                    token_id_up = token_id
-                if outcome in {"no", "down", "lower"} and token_id:
-                    token_id_down = token_id
-
-        clob_ids = market.get("clobTokenIds") or market.get("clob_token_ids")
-        if isinstance(clob_ids, list) and len(clob_ids) >= 2:
-            if not token_id_up:
-                token_id_up = str(clob_ids[0])
-            if not token_id_down:
-                token_id_down = str(clob_ids[1])
-
+        token_id_up, token_id_down = self._extract_token_ids(market)
         if not token_id_up or not token_id_down:
             return None
 
         spread = self._extract_spread(market)
         tick_size = Decimal(str(market.get("tickSize") or market.get("tick_size") or "0.01"))
-        resolution_source = str(market.get("resolutionSource") or market.get("resolution_source") or "")
+        resolution_source = self._extract_resolution_source(market)
         up_price, down_price = self._extract_token_prices(market)
 
         return MarketContext(
@@ -91,38 +102,230 @@ class MarketFinder:
             down_price=down_price,
         )
 
+    @staticmethod
+    def _build_market_text_blob(market: dict[str, Any]) -> str:
+        parts: list[str] = []
+        for key in ("question", "title", "slug", "market_slug", "ticker", "description", "rules"):
+            value = market.get(key)
+            if isinstance(value, str) and value.strip():
+                parts.append(value)
+
+        events = market.get("events")
+        if isinstance(events, list):
+            for event in events:
+                if not isinstance(event, dict):
+                    continue
+                for key in (
+                    "title",
+                    "slug",
+                    "ticker",
+                    "description",
+                    "rules",
+                    "resolutionSource",
+                    "resolution_source",
+                ):
+                    value = event.get(key)
+                    if isinstance(value, str) and value.strip():
+                        parts.append(value)
+
+        return " ".join(parts).lower()
+
     def _is_target_btc_hourly_market(self, market: dict[str, Any], title: str) -> bool:
         if "btc" not in title and "bitcoin" not in title:
             return False
 
-        # Explicitly reject shorter intraday contracts.
-        lower_timeframes = ("5 minute", "5m", "15 minute", "15m", "30 minute", "30m")
-        if any(token in title for token in lower_timeframes):
+        if any(token in title for token in self._LOWER_TIMEFRAME_MARKERS):
             return False
 
-        # Accept explicit hourly wording quickly.
-        if "hour" in title or "1h" in title or "60 minute" in title or "60m" in title:
+        if any(token in title for token in self._HOURLY_TEXT_MARKERS):
             return True
 
-        # Fall back to duration-based detection when start/end exist.
-        start_raw = market.get("startDate") or market.get("start_date") or market.get("startTime")
-        end_raw = market.get("endDate") or market.get("end_date") or market.get("endTime")
-        if not start_raw or not end_raw:
-            return False
+        slug = str(market.get("slug") or market.get("market_slug") or "").lower()
+        if self._looks_like_hourly_slug(slug):
+            return True
+
+        duration_seconds = self._extract_duration_seconds(market)
+        if duration_seconds is not None and 45 * 60 <= duration_seconds <= 75 * 60:
+            return True
+
+        # Fallback: current BTC up/down contracts often include wall-clock markers without the literal "hour" text.
+        has_direction_pair = ("up" in title and "down" in title) or ("yes" in title and "no" in title)
+        padded_title = f" {title} "
+        has_time_marker = " am " in padded_title or " pm " in padded_title or " et" in title or " utc" in title
+        if has_direction_pair and has_time_marker and not any(
+            marker in title for marker in self._UPPER_TIMEFRAME_MARKERS
+        ):
+            return True
+
+        return False
+
+    def _extract_duration_seconds(self, market: dict[str, Any]) -> float | None:
+        start_raw = self._extract_market_time_raw(
+            market,
+            keys=("startDate", "start_date", "startTime", "start_time"),
+        )
+        end_raw = self._extract_market_end_time_raw(market)
+        if start_raw is None or end_raw is None:
+            return None
 
         try:
-            start = self._parse_datetime(str(start_raw))
-            end = self._parse_datetime(str(end_raw))
+            start = self._parse_datetime(start_raw)
+            end = self._parse_datetime(end_raw)
         except ValueError:
-            return False
+            return None
 
-        duration_seconds = (end - start).total_seconds()
-        # Hourly markets are expected around 60 minutes; keep a tolerance window.
-        return 45 * 60 <= duration_seconds <= 75 * 60
+        return (end - start).total_seconds()
+
+    def _extract_market_end_time_raw(self, market: dict[str, Any]) -> Any | None:
+        end = self._extract_market_time_raw(
+            market,
+            keys=("endDate", "end_date", "endTime", "end_time", "closeDate"),
+        )
+        if end is not None:
+            return end
+
+        events = market.get("events")
+        if isinstance(events, list):
+            for event in events:
+                if not isinstance(event, dict):
+                    continue
+                end = self._extract_market_time_raw(
+                    event,
+                    keys=("endDate", "end_date", "endTime", "end_time", "closeDate"),
+                )
+                if end is not None:
+                    return end
+
+        return None
 
     @staticmethod
-    def _parse_datetime(value: str) -> datetime:
-        sanitized = value.replace("Z", "+00:00")
+    def _extract_market_time_raw(payload: dict[str, Any], *, keys: tuple[str, ...]) -> Any | None:
+        for key in keys:
+            value = payload.get(key)
+            if value not in (None, ""):
+                return value
+        return None
+
+    @staticmethod
+    def _looks_like_hourly_slug(slug: str) -> bool:
+        if not slug:
+            return False
+        if "btc" not in slug and "bitcoin" not in slug:
+            return False
+        if any(token in slug for token in ("5-minute", "15-minute", "30-minute", "5m", "15m", "30m")):
+            return False
+        if any(token in slug for token in ("hour", "1h", "60m")):
+            return True
+        if ("up" in slug and "down" in slug) and MarketFinder._SLUG_TIME_MARKER_RE.search(slug):
+            return True
+        return False
+
+    def _extract_condition_id(self, market: dict[str, Any]) -> str:
+        condition_id = str(market.get("conditionId") or market.get("condition_id") or "").strip()
+        if condition_id:
+            return condition_id
+
+        tokens = market.get("tokens")
+        if isinstance(tokens, list):
+            for token in tokens:
+                if not isinstance(token, dict):
+                    continue
+                candidate = str(
+                    token.get("conditionId")
+                    or token.get("condition_id")
+                    or token.get("marketConditionId")
+                    or ""
+                ).strip()
+                if candidate:
+                    return candidate
+
+        return ""
+
+    def _extract_token_ids(self, market: dict[str, Any]) -> tuple[str, str]:
+        token_id_up = ""
+        token_id_down = ""
+
+        tokens = market.get("tokens")
+        if isinstance(tokens, list):
+            for token in tokens:
+                if not isinstance(token, dict):
+                    continue
+                outcome = str(token.get("outcome") or token.get("name") or "").lower()
+                token_id = str(token.get("token_id") or token.get("tokenId") or token.get("id") or "").strip()
+                if not token_id:
+                    continue
+                if outcome in {"yes", "up", "higher"}:
+                    token_id_up = token_id
+                elif outcome in {"no", "down", "lower"}:
+                    token_id_down = token_id
+
+        clob_ids = self._extract_clob_token_ids(market)
+        if len(clob_ids) >= 2:
+            if not token_id_up:
+                token_id_up = clob_ids[0]
+            if not token_id_down:
+                token_id_down = clob_ids[1]
+
+        return token_id_up, token_id_down
+
+    @staticmethod
+    def _extract_clob_token_ids(market: dict[str, Any]) -> list[str]:
+        raw = market.get("clobTokenIds") or market.get("clob_token_ids")
+        if isinstance(raw, list):
+            return [str(item).strip() for item in raw if str(item).strip()]
+
+        if isinstance(raw, str):
+            stripped = raw.strip()
+            if stripped.startswith("[") and stripped.endswith("]"):
+                try:
+                    parsed = json.loads(stripped)
+                    if isinstance(parsed, list):
+                        return [str(item).strip() for item in parsed if str(item).strip()]
+                except json.JSONDecodeError:
+                    pass
+            if "," in stripped:
+                return [item.strip().strip('"').strip("'") for item in stripped.split(",") if item.strip()]
+
+        return []
+
+    @staticmethod
+    def _extract_resolution_source(market: dict[str, Any]) -> str:
+        direct = market.get("resolutionSource") or market.get("resolution_source")
+        if isinstance(direct, str) and direct.strip():
+            return direct
+
+        for key in ("description", "rules"):
+            value = market.get(key)
+            if isinstance(value, str) and "binance" in value.lower():
+                return "Binance"
+
+        events = market.get("events")
+        if isinstance(events, list):
+            for event in events:
+                if not isinstance(event, dict):
+                    continue
+                event_source = event.get("resolutionSource") or event.get("resolution_source")
+                if isinstance(event_source, str) and event_source.strip():
+                    return event_source
+                for key in ("description", "rules"):
+                    value = event.get(key)
+                    if isinstance(value, str) and "binance" in value.lower():
+                        return "Binance"
+
+        return ""
+
+    @staticmethod
+    def _parse_datetime(value: str | int | float) -> datetime:
+        if isinstance(value, (int, float)):
+            parsed = datetime.fromtimestamp(float(value), tz=timezone.utc)
+            return parsed.astimezone(timezone.utc)
+
+        raw = str(value).strip()
+        if raw.isdigit():
+            parsed = datetime.fromtimestamp(float(raw), tz=timezone.utc)
+            return parsed.astimezone(timezone.utc)
+
+        sanitized = raw.replace("Z", "+00:00")
         parsed = datetime.fromisoformat(sanitized)
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=timezone.utc)
@@ -151,12 +354,7 @@ class MarketFinder:
                 if not isinstance(token, dict):
                     continue
                 outcome = str(token.get("outcome") or token.get("name") or "").lower()
-                raw_price = (
-                    token.get("price")
-                    or token.get("lastPrice")
-                    or token.get("bestAsk")
-                    or token.get("bestBid")
-                )
+                raw_price = token.get("price") or token.get("lastPrice") or token.get("bestAsk") or token.get("bestBid")
                 if raw_price is None:
                     continue
                 price = Decimal(str(raw_price))
