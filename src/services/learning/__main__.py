@@ -12,6 +12,7 @@ from src.core.clock import utc_now
 from src.core.logging import configure_logging
 from src.db.engine import Database
 from src.services.learning.approval_workflow import ApprovalWorkflow
+from src.services.learning.ai_prompt_advisor import AIPromptAdvisor
 from src.services.learning.param_advisor import ParamAdvisor
 from src.services.learning.performance_analyzer import PerformanceAnalyzer
 
@@ -28,14 +29,18 @@ async def run_daily_cycle() -> None:
     workflow = ApprovalWorkflow(settings=settings, database=database, alert_callback=alert_callback)
     analyzer = PerformanceAnalyzer(settings)
     advisor = ParamAdvisor(settings)
+    ai_advisor = AIPromptAdvisor(settings)
 
     target_day = (utc_now() - timedelta(days=1)).date()
 
     async with database.session() as session:
         metrics = await analyzer.analyze_day(metric_day=target_day, session=session)
+        ai_proposals, ai_notifications = await ai_advisor.generate(session=session)
 
-    proposals = advisor.generate_proposals(metrics)
+    proposals = advisor.generate_proposals(metrics) + ai_proposals
     count = await workflow.stage_proposals(proposals)
+    for notification in ai_notifications:
+        await alert_callback(notification)
     logger.info("learning_cycle_complete", metric_day=str(target_day), proposals_created=count)
 
     await database.dispose()

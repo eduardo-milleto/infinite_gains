@@ -17,6 +17,9 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    networks:
+      - app_net
+      - analyst_net
 
   migrate:
     build: .
@@ -26,6 +29,8 @@ services:
       postgres:
         condition: service_healthy
     command: ["alembic", "-c", "alembic/alembic.ini", "upgrade", "head"]
+    networks:
+      - app_net
 
   trader:
     build: .
@@ -37,6 +42,34 @@ services:
     command: ["python", "-m", "src.services.trader.__main__"]
     ports:
       - "8080:8080"
+    networks:
+      - app_net
+
+  web_api:
+    build: .
+    env_file:
+      - .env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    command: ["python", "-m", "src.services.web.__main__"]
+    ports:
+      - "8081:8081"
+    networks:
+      - app_net
+
+  frontend:
+    build:
+      context: ./frontend
+    depends_on:
+      web_api:
+        condition: service_started
+    environment:
+      VITE_API_PROXY_TARGET: http://web_api:8081
+    ports:
+      - "5173:5173"
+    networks:
+      - app_net
 
   telegram_bot:
     build: .
@@ -46,6 +79,8 @@ services:
       migrate:
         condition: service_completed_successfully
     command: ["python", "-m", "src.services.telegram.__main__"]
+    networks:
+      - app_net
 
   learning:
     build: .
@@ -55,6 +90,30 @@ services:
       migrate:
         condition: service_completed_successfully
     command: ["python", "-m", "src.services.learning.__main__"]
+    networks:
+      - app_net
+
+  openclaw:
+    build: .
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgresql+asyncpg://analyst_ro:${ANALYST_RO_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      MINIMAX_API_KEY: ${MINIMAX_API_KEY}
+      MINIMAX_MODEL: ${MINIMAX_MODEL}
+      OPENCLAW_ENABLED: ${OPENCLAW_ENABLED}
+      OPENCLAW_SCHEDULE_HOURS: ${OPENCLAW_SCHEDULE_HOURS}
+      OPENCLAW_MIN_TRADES_FOR_ANALYSIS: ${OPENCLAW_MIN_TRADES_FOR_ANALYSIS}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TELEGRAM_ALLOWED_CHAT_IDS: ${TELEGRAM_ALLOWED_CHAT_IDS}
+    command: ["python", "-m", "src.services.openclaw.__main__"]
+    networks:
+      - analyst_net
 
 volumes:
   postgres_data:
+
+networks:
+  app_net:
+  analyst_net:

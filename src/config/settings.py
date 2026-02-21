@@ -7,7 +7,7 @@ from typing import Any
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from src.core.enums import TradingMode
+from src.core.enums import AIFallbackMode, ExitMode, TradingMode
 
 
 class Settings(BaseSettings):
@@ -63,8 +63,37 @@ class Settings(BaseSettings):
     scheduler_poll_interval_secs: int = 60
 
     metrics_port: int = 8080
+    web_api_host: str = "0.0.0.0"
+    web_api_port: int = 8081
     grafana_admin_user: str = "admin"
     grafana_admin_password: SecretStr = Field(default=SecretStr("admin"), repr=False)
+
+    minimax_api_key: SecretStr = Field(default=SecretStr(""), repr=False)
+    minimax_model: str = "MiniMax-Text-01"
+    minimax_enabled: bool = False
+    minimax_api_base_url: str = "https://api.minimax.chat/v1"
+    ai_fallback_mode: AIFallbackMode = AIFallbackMode.VETO
+    ai_min_edge: Decimal = Decimal("0.05")
+    ai_min_confidence: int = 55
+    ai_max_latency_ms: int = 10000
+    ai_candle_history_count: int = 12
+    ai_max_consecutive_failures: int = 3
+
+    exit_mode: ExitMode = ExitMode.SCALP
+    exit_profit_target_cents: int = 10
+    exit_stop_loss_cents: int = 5
+    exit_time_before_close_secs: int = 600
+    exit_on_signal_reversal: bool = True
+    exit_min_profit_cents: int = 5
+    exit_max_profit_cents: int = 20
+    exit_min_stop_cents: int = 3
+    exit_max_stop_cents: int = 15
+    position_monitor_interval_secs: int = 30
+
+    openclaw_enabled: bool = False
+    openclaw_schedule_hours: int = 6
+    openclaw_min_trades_for_analysis: int = 20
+    analyst_ro_password: SecretStr = Field(default=SecretStr("analyst-change-me"), repr=False)
 
     @field_validator("telegram_allowed_chat_ids", mode="before")
     @classmethod
@@ -103,6 +132,32 @@ class Settings(BaseSettings):
             "max_trades_per_day": str(self.risk_max_trades_per_day),
             "max_open_positions": str(self.risk_max_open_positions),
             "cooldown_seconds": str(self.risk_cooldown_seconds),
+        }
+
+    def snapshot_ai(self) -> dict[str, str]:
+        return {
+            "minimax_enabled": str(self.minimax_enabled),
+            "minimax_model": self.minimax_model,
+            "ai_fallback_mode": self.ai_fallback_mode.value,
+            "ai_min_edge": str(self.ai_min_edge),
+            "ai_min_confidence": str(self.ai_min_confidence),
+            "ai_max_latency_ms": str(self.ai_max_latency_ms),
+            "ai_candle_history_count": str(self.ai_candle_history_count),
+            "ai_max_consecutive_failures": str(self.ai_max_consecutive_failures),
+        }
+
+    def snapshot_exit(self) -> dict[str, str]:
+        return {
+            "exit_mode": self.exit_mode.value,
+            "exit_profit_target_cents": str(self.exit_profit_target_cents),
+            "exit_stop_loss_cents": str(self.exit_stop_loss_cents),
+            "exit_time_before_close_secs": str(self.exit_time_before_close_secs),
+            "exit_on_signal_reversal": str(self.exit_on_signal_reversal),
+            "exit_min_profit_cents": str(self.exit_min_profit_cents),
+            "exit_max_profit_cents": str(self.exit_max_profit_cents),
+            "exit_min_stop_cents": str(self.exit_min_stop_cents),
+            "exit_max_stop_cents": str(self.exit_max_stop_cents),
+            "position_monitor_interval_secs": str(self.position_monitor_interval_secs),
         }
 
 

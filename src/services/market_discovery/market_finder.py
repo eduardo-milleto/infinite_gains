@@ -78,6 +78,7 @@ class MarketFinder:
         spread = self._extract_spread(market)
         tick_size = Decimal(str(market.get("tickSize") or market.get("tick_size") or "0.01"))
         resolution_source = str(market.get("resolutionSource") or market.get("resolution_source") or "")
+        up_price, down_price = self._extract_token_prices(market)
 
         return MarketContext(
             market_slug=slug,
@@ -88,6 +89,8 @@ class MarketFinder:
             tick_size=tick_size,
             market_end_time=market_end_time,
             resolution_source=resolution_source,
+            up_price=up_price,
+            down_price=down_price,
         )
 
     @staticmethod
@@ -109,3 +112,46 @@ class MarketFinder:
         if best_bid is not None and best_ask is not None:
             return abs(Decimal(str(best_ask)) - Decimal(str(best_bid)))
         return Decimal("0")
+
+    @staticmethod
+    def _extract_token_prices(market: dict[str, Any]) -> tuple[Decimal, Decimal]:
+        up_price: Decimal | None = None
+        down_price: Decimal | None = None
+
+        tokens = market.get("tokens")
+        if isinstance(tokens, list):
+            for token in tokens:
+                if not isinstance(token, dict):
+                    continue
+                outcome = str(token.get("outcome") or token.get("name") or "").lower()
+                raw_price = (
+                    token.get("price")
+                    or token.get("lastPrice")
+                    or token.get("bestAsk")
+                    or token.get("bestBid")
+                )
+                if raw_price is None:
+                    continue
+                price = Decimal(str(raw_price))
+                if outcome in {"yes", "up", "higher"}:
+                    up_price = price
+                if outcome in {"no", "down", "lower"}:
+                    down_price = price
+
+        if up_price is None and down_price is None:
+            best_bid = market.get("bestBid") or market.get("best_bid")
+            best_ask = market.get("bestAsk") or market.get("best_ask")
+            if best_bid is not None and best_ask is not None:
+                mid = (Decimal(str(best_bid)) + Decimal(str(best_ask))) / Decimal("2")
+                up_price = mid
+
+        if up_price is None and down_price is not None:
+            up_price = Decimal("1") - down_price
+        if down_price is None and up_price is not None:
+            down_price = Decimal("1") - up_price
+        if up_price is None:
+            up_price = Decimal("0.50")
+        if down_price is None:
+            down_price = Decimal("0.50")
+
+        return up_price, down_price

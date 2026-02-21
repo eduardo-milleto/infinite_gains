@@ -6,11 +6,13 @@ from decimal import Decimal
 from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.core.enums import OrderStatus, ProposalStatus, SignalType, TradingMode
-from src.core.types import IndicatorSnapshot, OrderResult
+from src.core.enums import OpenClawProposalStatus, OrderStatus, ProposalStatus, SignalType, TradingMode
+from src.core.types import AIDecision, IndicatorSnapshot, OrderResult
 from src.db.models import (
+    AIDecisionModel,
     ConfigHistoryModel,
     MarketSessionModel,
+    OpenClawProposalModel,
     PerformanceMetricsModel,
     SignalModel,
     TradeModel,
@@ -74,6 +76,7 @@ class TradeRepo:
             candle_open_utc=candle_open_utc,
             order_id=order_result.order_id,
             price=order_result.price,
+            price_entry=order_result.price,
             size_usdc=order_result.size_usdc,
             size_filled_usdc=order_result.size_filled_usdc,
             status=order_result.status.value,
@@ -126,10 +129,15 @@ class TradeRepo:
         fees_usdc: Decimal | None = None,
         resolved_direction: str | None = None,
         failure_reason: str | None = None,
+        price_exit: Decimal | None = None,
+        exit_reason: str | None = None,
+        exit_confirmed_at: datetime | None = None,
     ) -> TradeModel | None:
         query = select(TradeModel).where(TradeModel.order_id == order_id).limit(1)
         row = (await self.session.execute(query)).scalars().first()
         if row is None:
+            return None
+        if row.status == OrderStatus.SETTLED.value and status == OrderStatus.SETTLED:
             return None
 
         row.status = status.value
@@ -145,6 +153,12 @@ class TradeRepo:
             row.resolved_direction = resolved_direction
         if failure_reason is not None:
             row.failure_reason = failure_reason
+        if price_exit is not None:
+            row.price_exit = price_exit
+        if exit_reason is not None:
+            row.exit_reason = exit_reason
+        if exit_confirmed_at is not None:
+            row.exit_confirmed_at = exit_confirmed_at
         await self.session.flush()
         return row
 
@@ -183,6 +197,259 @@ class TradeRepo:
         )
         rows = (await self.session.execute(query)).scalars().all()
         return list(rows)
+
+    async def get_by_id(self, trade_id: int) -> TradeModel | None:
+        return await self.session.get(TradeModel, trade_id)
+
+    async def list_open_positions(self) -> list[TradeModel]:
+        query = select(TradeModel).where(
+            TradeModel.status.in_(
+                [
+                    OrderStatus.SUBMITTED.value,
+                    OrderStatus.MATCHED.value,
+                    OrderStatus.CONFIRMED.value,
+                ]
+            )
+        )
+        rows = (await self.session.execute(query)).scalars().all()
+        return list(rows)
+
+    async def update_exit(
+        self,
+        *,
+        trade_id: int,
+        price_exit: Decimal,
+        exit_reason: str,
+        exit_requested_at: datetime,
+        exit_confirmed_at: datetime,
+        hold_duration_secs: int,
+        exit_order_id: str | None,
+        pnl_usdc: Decimal,
+        status: OrderStatus = OrderStatus.SETTLED,
+    ) -> TradeModel | None:
+        row = await self.session.get(TradeModel, trade_id)
+        if row is None:
+            return None
+
+        row.price_exit = price_exit
+        row.exit_reason = exit_reason
+        row.exit_requested_at = exit_requested_at
+        row.exit_confirmed_at = exit_confirmed_at
+        row.hold_duration_secs = hold_duration_secs
+        row.exit_order_id = exit_order_id
+        row.pnl_usdc = pnl_usdc
+        row.status = status.value
+        await self.session.flush()
+        return row
+
+    async def list_recent_exits(self, *, limit: int = 10) -> list[TradeModel]:
+        query = (
+            select(TradeModel)
+            .where(TradeModel.exit_reason.is_not(None))
+            .order_by(TradeModel.exit_confirmed_at.desc())
+            .limit(limit)
+        )
+        rows = (await self.session.execute(query)).scalars().all()
+        return list(rows)
+
+
+class AIDecisionRepo:
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+
+    async def create(
+        self,
+        *,
+        signal_id: int,
+        evaluated_at: datetime,
+        model_id: str,
+        fallback_used: bool,
+        latency_ms: int,
+        raw_response_hash: str,
+        decision: AIDecision,
+        trade_id: int | None = None,
+    ) -> AIDecisionModel:
+        row = AIDecisionModel(
+            signal_id=signal_id,
+            trade_id=trade_id,
+            evaluated_at=evaluated_at,
+            model_id=model_id,
+            fallback_used=fallback_used,
+            latency_ms=latency_ms,
+            raw_response_hash=raw_response_hash,
+            proceed=decision.proceed,
+            direction_probability=decision.direction_probability,
+            market_price=decision.market_price,
+            edge=decision.edge,
+            confidence=decision.confidence,
+            position_size_factor=decision.position_size_factor,
+            reasoning=decision.reasoning,
+            warning_flags=list(decision.warning_flags),
+            suggested_profit_target_cents=decision.suggested_profit_target_cents,
+            suggested_stop_loss_cents=decision.suggested_stop_loss_cents,
+        )
+        self.session.add(row)
+        await self.session.flush()
+        return row
+
+    async def attach_trade(self, ai_decision_id: int, trade_id: int) -> None:
+        row = await self.session.get(AIDecisionModel, ai_decision_id)
+        if row is None:
+            return
+        row.trade_id = trade_id
+        await self.session.flush()
+
+    async def settle_outcome_by_trade_id(
+        self,
+        *,
+        trade_id: int,
+        outcome_pnl: Decimal,
+        settled_at: datetime,
+    ) -> None:
+        query = select(AIDecisionModel).where(AIDecisionModel.trade_id == trade_id)
+        row = (await self.session.execute(query)).scalars().first()
+        if row is None:
+            return
+        row.outcome_pnl = outcome_pnl
+        row.outcome_settled_at = settled_at
+        await self.session.flush()
+
+    async def get_by_trade_id(self, trade_id: int) -> AIDecisionModel | None:
+        query = (
+            select(AIDecisionModel)
+            .where(AIDecisionModel.trade_id == trade_id)
+            .order_by(AIDecisionModel.evaluated_at.desc())
+            .limit(1)
+        )
+        return (await self.session.execute(query)).scalars().first()
+
+    async def summary_stats(self) -> dict[str, Decimal | int]:
+        total_query = select(func.count()).select_from(AIDecisionModel)
+        total = int((await self.session.execute(total_query)).scalar_one())
+
+        veto_query = select(func.count()).select_from(AIDecisionModel).where(AIDecisionModel.proceed.is_(False))
+        veto_count = int((await self.session.execute(veto_query)).scalar_one())
+
+        avg_latency_query = select(func.coalesce(func.avg(AIDecisionModel.latency_ms), 0))
+        avg_latency = Decimal(str((await self.session.execute(avg_latency_query)).scalar_one()))
+
+        fallback_query = select(func.count()).select_from(AIDecisionModel).where(AIDecisionModel.fallback_used.is_(True))
+        fallback_count = int((await self.session.execute(fallback_query)).scalar_one())
+
+        veto_rate = Decimal("0") if total == 0 else Decimal(veto_count) / Decimal(total)
+        return {
+            "total_decisions": total,
+            "veto_count": veto_count,
+            "veto_rate": veto_rate,
+            "avg_latency_ms": avg_latency,
+            "fallback_count": fallback_count,
+        }
+
+    async def list_settled_since(self, since_utc: datetime) -> list[AIDecisionModel]:
+        query = select(AIDecisionModel).where(
+            AIDecisionModel.outcome_settled_at.is_not(None),
+            AIDecisionModel.outcome_settled_at >= since_utc,
+        )
+        rows = (await self.session.execute(query)).scalars().all()
+        return list(rows)
+
+    async def consecutive_fallback_count(self, *, model_id: str, limit: int = 50) -> int:
+        query = (
+            select(AIDecisionModel)
+            .where(AIDecisionModel.model_id == model_id)
+            .order_by(AIDecisionModel.evaluated_at.desc())
+            .limit(limit)
+        )
+        rows = list((await self.session.execute(query)).scalars().all())
+        count = 0
+        for row in rows:
+            if row.fallback_used:
+                count += 1
+                continue
+            break
+        return count
+
+
+class OpenClawProposalRepo:
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+
+    async def create(
+        self,
+        *,
+        proposed_at: datetime,
+        analysis_type: str,
+        findings: dict[str, object],
+        proposal_text: str,
+        structured_change: dict[str, object],
+        evidence_window_days: int,
+        status: OpenClawProposalStatus = OpenClawProposalStatus.PENDING,
+    ) -> OpenClawProposalModel:
+        row = OpenClawProposalModel(
+            proposed_at=proposed_at,
+            analysis_type=analysis_type,
+            findings=findings,
+            proposal_text=proposal_text,
+            structured_change=structured_change,
+            status=status.value,
+            evidence_window_days=evidence_window_days,
+        )
+        self.session.add(row)
+        await self.session.flush()
+        return row
+
+    async def list_pending(self, *, limit: int = 20) -> list[OpenClawProposalModel]:
+        query = (
+            select(OpenClawProposalModel)
+            .where(OpenClawProposalModel.status == OpenClawProposalStatus.PENDING.value)
+            .order_by(OpenClawProposalModel.proposed_at.desc())
+            .limit(limit)
+        )
+        rows = (await self.session.execute(query)).scalars().all()
+        return list(rows)
+
+    async def list_recent(self, *, limit: int = 10) -> list[OpenClawProposalModel]:
+        query = (
+            select(OpenClawProposalModel)
+            .order_by(OpenClawProposalModel.proposed_at.desc())
+            .limit(limit)
+        )
+        rows = (await self.session.execute(query)).scalars().all()
+        return list(rows)
+
+    async def get_by_id(self, proposal_id: int) -> OpenClawProposalModel | None:
+        return await self.session.get(OpenClawProposalModel, proposal_id)
+
+    async def set_status(
+        self,
+        *,
+        proposal_id: int,
+        status: OpenClawProposalStatus,
+        approved_by: str | None = None,
+        approved_at: datetime | None = None,
+        applied_at: datetime | None = None,
+        outcome_note: str | None = None,
+    ) -> bool:
+        row = await self.session.get(OpenClawProposalModel, proposal_id)
+        if row is None:
+            return False
+        row.status = status.value
+        if approved_by is not None:
+            row.approved_by = approved_by
+        if approved_at is not None:
+            row.approved_at = approved_at
+        if applied_at is not None:
+            row.applied_at = applied_at
+        if outcome_note is not None:
+            row.outcome_note = outcome_note
+        await self.session.flush()
+        return True
+
+    async def pending_count(self) -> int:
+        query = select(func.count()).select_from(OpenClawProposalModel).where(
+            OpenClawProposalModel.status == OpenClawProposalStatus.PENDING.value
+        )
+        return int((await self.session.execute(query)).scalar_one())
 
 
 class ConfigRepo:
@@ -343,3 +610,6 @@ class MarketSessionRepo:
             row.market_end_time = market_end_time
         await self.session.flush()
         return row
+
+    async def get_by_candle_open(self, candle_open_utc: datetime) -> MarketSessionModel | None:
+        return await self.session.get(MarketSessionModel, candle_open_utc)

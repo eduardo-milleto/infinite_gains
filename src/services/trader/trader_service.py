@@ -11,11 +11,15 @@ from prometheus_client import Counter, Gauge, Histogram, start_http_server
 
 from src.config.settings import Settings
 from src.core.clock import utc_now
-from src.core.enums import OrderStatus, ProposalStatus, SignalType
+from src.core.enums import AIFallbackMode, ExitMode, ExitReason, OrderStatus, ProposalStatus, SignalType
 from src.core.exceptions import APIFailureError, MarketDiscoveryError, RiskVetoError
+from src.core.types import AIDecision
 from src.db.engine import Database
 from src.db.repository import ConfigRepo, MarketSessionRepo, SignalRepo, TradeRepo
+from src.services.ai.decision_engine import DecisionEngine
+from src.services.execution.exit_engine import ExitEngine
 from src.services.execution.order_manager import OrderManager
+from src.services.execution.position_monitor import PositionMonitor
 from src.services.indicators.signal_engine import SignalEngine
 from src.services.indicators.taapi_client import TaapiClient
 from src.services.market_discovery.market_finder import MarketFinder
@@ -54,8 +58,11 @@ class TraderService:
         signal_engine: SignalEngine,
         risk_engine: RiskEngine,
         order_manager: OrderManager,
+        exit_engine: ExitEngine | None,
+        position_monitor: PositionMonitor | None,
         kill_switch: KillSwitch,
         position_tracker: PositionTracker,
+        decision_engine: DecisionEngine | None = None,
         alert_callback: AlertCallback | None = None,
     ) -> None:
         self._settings = settings
@@ -65,8 +72,11 @@ class TraderService:
         self._signal_engine = signal_engine
         self._risk_engine = risk_engine
         self._order_manager = order_manager
+        self._exit_engine = exit_engine
+        self._position_monitor = position_monitor
         self._kill_switch = kill_switch
         self._position_tracker = position_tracker
+        self._decision_engine = decision_engine
         self._alert_callback = alert_callback
         self._metrics_started = False
 
@@ -141,8 +151,41 @@ class TraderService:
                 logger.info("no_signal", reason=signal.reason)
                 return
 
+            ai_decision: AIDecision | None = None
+            ai_decision_id: int | None = None
+            if self._decision_engine is not None:
+                ai_decision, ai_decision_id = await self._decision_engine.evaluate(
+                    signal_id=signal_row.id,
+                    signal=signal,
+                    market_context=market_context,
+                    now_utc=now_utc,
+                    session=session,
+                )
+                if not self._ai_gate_passed(ai_decision):
+                    SIGNALS_VETOED.inc()
+                    signal_row.filter_result = (
+                        f"AI veto: proceed={ai_decision.proceed} edge={ai_decision.edge} "
+                        f"confidence={ai_decision.confidence}"
+                    )
+                    logger.info(
+                        "ai_veto",
+                        signal_id=signal_row.id,
+                        proceed=ai_decision.proceed,
+                        edge=str(ai_decision.edge),
+                        confidence=ai_decision.confidence,
+                        fallback=ai_decision.fallback_used,
+                    )
+                    if (
+                        self._settings.ai_fallback_mode == AIFallbackMode.TELEGRAM
+                        and self._alert_callback is not None
+                    ):
+                        await self._alert_callback(
+                            f"AI review required for signal={signal_row.id}: {ai_decision.reasoning}"
+                        )
+                    return
+
             try:
-                approved_size = await self._risk_engine.approve_trade(
+                risk_approved_size = await self._risk_engine.approve_trade(
                     signal=signal,
                     market_context=market_context,
                     now_utc=now_utc,
@@ -153,6 +196,10 @@ class TraderService:
                 signal_row.filter_result = str(exc)
                 logger.info("trade_vetoed", reason=str(exc), signal_type=signal.signal_type.value)
                 return
+
+            approved_size = risk_approved_size
+            if ai_decision is not None:
+                approved_size = self._apply_ai_position_modulation(risk_approved_size, ai_decision)
 
             direction = signal.direction
             if direction is None:
@@ -176,6 +223,12 @@ class TraderService:
                 trading_mode=self._settings.trading_mode,
                 order_result=order_result,
             )
+            if ai_decision_id is not None and self._decision_engine is not None:
+                await self._decision_engine.link_trade(
+                    session=session,
+                    ai_decision_id=ai_decision_id,
+                    trade_id=trade_row.id,
+                )
 
             if order_result.status == OrderStatus.SUBMITTED:
                 self._position_tracker.register_trade(snapshot.candle_open_utc, now_utc)
@@ -196,6 +249,17 @@ class TraderService:
                         f"Trade submitted [{self._settings.trading_mode.value}] {direction.value} "
                         f"{market_context.market_slug} size={order_result.size_usdc} order={order_result.order_id}"
                     )
+                if (
+                    self._settings.exit_mode == ExitMode.SCALP
+                    and self._position_monitor is not None
+                    and self._exit_engine is not None
+                ):
+                    exit_parameters = self._exit_engine.resolve_exit_parameters(ai_decision)
+                    await self._position_monitor.start(
+                        trade_id=trade_row.id,
+                        market_end_time=market_context.market_end_time,
+                        exit_parameters=exit_parameters,
+                    )
             else:
                 SIGNALS_VETOED.inc()
                 signal_row.filter_result = order_result.failure_reason or "Order submission failed"
@@ -210,16 +274,90 @@ class TraderService:
     async def _sync_control_state(self) -> None:
         async with self._database.session() as session:
             config_repo = ConfigRepo(session)
-            command = await config_repo.get_latest_value(
+            kill_switch_command = await config_repo.get_latest_value(
                 config_section="control",
                 param_key="kill_switch_state",
                 status=ProposalStatus.APPROVED,
             )
+            ai_enabled_raw = await config_repo.get_latest_value(
+                config_section="ai",
+                param_key="minimax_enabled",
+                status=ProposalStatus.APPROVED,
+            )
+            ai_min_edge_raw = await config_repo.get_latest_value(
+                config_section="ai",
+                param_key="ai_min_edge",
+                status=ProposalStatus.APPROVED,
+            )
+            ai_min_confidence_raw = await config_repo.get_latest_value(
+                config_section="ai",
+                param_key="ai_min_confidence",
+                status=ProposalStatus.APPROVED,
+            )
+            ai_fallback_mode_raw = await config_repo.get_latest_value(
+                config_section="ai",
+                param_key="ai_fallback_mode",
+                status=ProposalStatus.APPROVED,
+            )
+            exit_mode_raw = await config_repo.get_latest_value(
+                config_section="exit",
+                param_key="exit_mode",
+                status=ProposalStatus.APPROVED,
+            )
+            exit_profit_raw = await config_repo.get_latest_value(
+                config_section="exit",
+                param_key="exit_profit_target_cents",
+                status=ProposalStatus.APPROVED,
+            )
+            exit_stop_raw = await config_repo.get_latest_value(
+                config_section="exit",
+                param_key="exit_stop_loss_cents",
+                status=ProposalStatus.APPROVED,
+            )
+            exit_reversal_raw = await config_repo.get_latest_value(
+                config_section="exit",
+                param_key="exit_on_signal_reversal",
+                status=ProposalStatus.APPROVED,
+            )
 
-        if command == "TRIPPED" and not self._kill_switch.is_tripped:
+        if kill_switch_command == "TRIPPED" and not self._kill_switch.is_tripped:
             await self._kill_switch.trip("Paused via Telegram control command")
-        if command == "RESET" and self._kill_switch.is_tripped:
+        if kill_switch_command == "RESET" and self._kill_switch.is_tripped:
             await self._kill_switch.reset()
+        if ai_enabled_raw is not None:
+            self._settings.minimax_enabled = ai_enabled_raw.lower() in {"true", "1", "yes", "on"}
+        if ai_min_edge_raw is not None:
+            try:
+                self._settings.ai_min_edge = Decimal(ai_min_edge_raw)
+            except Exception:
+                logger.warning("invalid_ai_min_edge", value=ai_min_edge_raw)
+        if ai_min_confidence_raw is not None:
+            try:
+                self._settings.ai_min_confidence = int(ai_min_confidence_raw)
+            except Exception:
+                logger.warning("invalid_ai_min_confidence", value=ai_min_confidence_raw)
+        if ai_fallback_mode_raw is not None:
+            try:
+                self._settings.ai_fallback_mode = AIFallbackMode(ai_fallback_mode_raw)
+            except Exception:
+                logger.warning("invalid_ai_fallback_mode", value=ai_fallback_mode_raw)
+        if exit_mode_raw is not None:
+            try:
+                self._settings.exit_mode = ExitMode(exit_mode_raw)
+            except Exception:
+                logger.warning("invalid_exit_mode", value=exit_mode_raw)
+        if exit_profit_raw is not None:
+            try:
+                self._settings.exit_profit_target_cents = int(exit_profit_raw)
+            except Exception:
+                logger.warning("invalid_exit_profit_target_cents", value=exit_profit_raw)
+        if exit_stop_raw is not None:
+            try:
+                self._settings.exit_stop_loss_cents = int(exit_stop_raw)
+            except Exception:
+                logger.warning("invalid_exit_stop_loss_cents", value=exit_stop_raw)
+        if exit_reversal_raw is not None:
+            self._settings.exit_on_signal_reversal = exit_reversal_raw.lower() in {"true", "1", "yes", "on"}
 
     async def handle_fill_event(self, event: dict[str, Any]) -> None:
         order_id = str(event.get("orderID") or event.get("orderId") or event.get("order_id") or "")
@@ -236,6 +374,8 @@ class TraderService:
         fees_usdc = Decimal(str(event.get("fees") or "0"))
         resolved_direction = str(event.get("resolvedDirection") or event.get("resolved_direction") or "")
         resolved_direction_value = resolved_direction if resolved_direction else None
+        fill_price_raw = event.get("price") or event.get("avg_price") or event.get("matched_price")
+        price_exit = Decimal(str(fill_price_raw)) if fill_price_raw is not None else None
 
         async with self._database.session() as session:
             trade_repo = TradeRepo(session)
@@ -247,7 +387,18 @@ class TraderService:
                 pnl_usdc=pnl_usdc,
                 fees_usdc=fees_usdc,
                 resolved_direction=resolved_direction_value,
+                price_exit=price_exit,
+                exit_reason=ExitReason.RESOLUTION.value if status == OrderStatus.SETTLED else None,
+                exit_confirmed_at=utc_now() if status == OrderStatus.SETTLED else None,
             )
+            if status == OrderStatus.SETTLED and trade is not None and self._decision_engine is not None:
+                net_pnl = pnl_usdc - fees_usdc
+                await self._decision_engine.settle_trade_outcome(
+                    session=session,
+                    trade_id=trade.id,
+                    outcome_pnl=net_pnl,
+                    settled_at=utc_now(),
+                )
 
         if trade is None:
             return
@@ -266,6 +417,67 @@ class TraderService:
                 await self._alert_callback(
                     f"Trade settled order={order_id} direction={direction} pnl={net_pnl}"
                 )
+
+    async def handle_position_exit(self, trade_id: int, pnl_usdc: Decimal, reason: str) -> None:
+        self._position_tracker.register_closed_position(pnl_usdc)
+        TRADES_WON.inc() if pnl_usdc > 0 else TRADES_LOST.inc()
+        PNL_USDC_TOTAL.set(float(self._position_tracker.daily_pnl))
+        OPEN_POSITIONS.set(self._position_tracker.open_positions)
+        DAILY_LOSS_USDC.set(max(0.0, float(-self._position_tracker.daily_pnl)))
+
+        if self._decision_engine is not None:
+            async with self._database.session() as session:
+                await self._decision_engine.settle_trade_outcome(
+                    session=session,
+                    trade_id=trade_id,
+                    outcome_pnl=pnl_usdc,
+                    settled_at=utc_now(),
+                )
+
+        if self._alert_callback is not None:
+            await self._alert_callback(
+                f"Position closed trade_id={trade_id} reason={reason} pnl={pnl_usdc}"
+            )
+
+    def _ai_gate_passed(self, decision: AIDecision) -> bool:
+        if (
+            decision.fallback_used
+            and self._settings.ai_fallback_mode == AIFallbackMode.PROCEED
+            and decision.proceed
+        ):
+            return True
+        if not decision.proceed:
+            return False
+        if decision.edge < self._settings.ai_min_edge:
+            return False
+        if decision.confidence < self._settings.ai_min_confidence:
+            return False
+        return True
+
+    def _apply_ai_position_modulation(self, risk_approved_size: Decimal, decision: AIDecision) -> Decimal:
+        min_edge = self._settings.ai_min_edge if self._settings.ai_min_edge > 0 else Decimal("0.01")
+        edge_factor = self._clamp_decimal(decision.edge / min_edge, Decimal("0.5"), Decimal("1.0"))
+        confidence_factor = self._clamp_decimal(
+            Decimal(decision.confidence) / Decimal("100"),
+            Decimal("0.5"),
+            Decimal("1.0"),
+        )
+        ai_factor = self._clamp_decimal(decision.position_size_factor, Decimal("0.5"), Decimal("1.0"))
+        final_factor = self._clamp_decimal(
+            edge_factor * confidence_factor * ai_factor,
+            Decimal("0.5"),
+            Decimal("1.0"),
+        )
+        modulated = (risk_approved_size * final_factor).quantize(Decimal("0.01"))
+        return min(risk_approved_size, modulated)
+
+    @staticmethod
+    def _clamp_decimal(value: Decimal, lower: Decimal, upper: Decimal) -> Decimal:
+        if value < lower:
+            return lower
+        if value > upper:
+            return upper
+        return value
 
     @staticmethod
     def _map_fill_status(status_raw: str) -> OrderStatus | None:

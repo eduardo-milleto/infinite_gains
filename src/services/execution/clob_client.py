@@ -54,12 +54,13 @@ class ClobClientWrapper:
         token_id: str,
         price: Decimal,
         size_usdc: Decimal,
+        side: str = "BUY",
     ) -> OrderResult:
         payload = {
             "token_id": token_id,
             "price": str(price),
             "size": str(size_usdc),
-            "side": "BUY",
+            "side": side,
             "direction": direction.value,
         }
         try:
@@ -87,6 +88,30 @@ class ClobClientWrapper:
                 failure_reason=str(exc),
                 raw_response=scrubbed_failure,
             )
+
+    async def get_token_price(self, token_id: str) -> Decimal:
+        methods: list[tuple[str, tuple[Any, ...]]] = [
+            ("get_price", (token_id,)),
+            ("get_token_price", (token_id,)),
+            ("get_last_trade_price", (token_id,)),
+            ("get_order_book", (token_id,)),
+            ("get_orderbook", (token_id,)),
+            ("get_book", (token_id,)),
+        ]
+
+        for method_name, args in methods:
+            method = getattr(self._client, method_name, None)
+            if method is None:
+                continue
+            try:
+                raw = await asyncio.to_thread(method, *args)
+            except Exception:
+                continue
+            price = self._extract_price(raw)
+            if price is not None:
+                return price
+
+        raise APIFailureError("Unable to fetch token price from CLOB client")
 
     async def cancel_order(self, order_id: str) -> dict[str, Any]:
         method = getattr(self._client, "cancel", None) or getattr(self._client, "cancel_order", None)
@@ -122,6 +147,33 @@ class ClobClientWrapper:
             if value:
                 return str(value)
         return f"live-{uuid4()}"
+
+    @classmethod
+    def _extract_price(cls, payload: Any) -> Decimal | None:
+        if isinstance(payload, Decimal):
+            return payload
+        if isinstance(payload, (int, float, str)):
+            try:
+                return Decimal(str(payload))
+            except Exception:
+                return None
+
+        if isinstance(payload, dict):
+            for key in ("price", "lastPrice", "last_price", "mid", "markPrice", "mark_price"):
+                value = payload.get(key)
+                if value is not None:
+                    try:
+                        return Decimal(str(value))
+                    except Exception:
+                        continue
+            bid = payload.get("bestBid") or payload.get("best_bid")
+            ask = payload.get("bestAsk") or payload.get("best_ask")
+            if bid is not None and ask is not None:
+                try:
+                    return (Decimal(str(bid)) + Decimal(str(ask))) / Decimal("2")
+                except Exception:
+                    return None
+        return None
 
     @classmethod
     def _scrub(cls, payload: Any) -> Any:

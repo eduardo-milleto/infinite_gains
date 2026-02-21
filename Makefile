@@ -1,6 +1,6 @@
 PYTHON ?= python3
 
-.PHONY: install lint format typecheck test run-trader run-telegram run-learning migrate up down up-monitoring
+.PHONY: install lint format typecheck test run-trader run-telegram run-learning run-openclaw run-web run-frontend migrate up down up-monitoring
 
 install:
 	$(PYTHON) -m pip install -e .[dev]
@@ -25,6 +25,15 @@ run-telegram:
 
 run-learning:
 	$(PYTHON) -m src.services.learning.__main__
+
+run-openclaw:
+	$(PYTHON) -m src.services.openclaw.__main__
+
+run-web:
+	$(PYTHON) -m src.services.web.__main__
+
+run-frontend:
+	cd frontend && npm run dev -- --host 0.0.0.0 --port 5173
 
 migrate:
 	alembic -c alembic/alembic.ini upgrade head

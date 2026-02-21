@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from decimal import Decimal
+from enum import Enum
 from typing import Any
 
 from sqlalchemy import select
@@ -99,6 +100,9 @@ class ApprovalWorkflow:
 
     @staticmethod
     def _cast_value(raw_value: str, current: Any) -> Any:
+        if isinstance(current, Enum):
+            enum_type = type(current)
+            return enum_type(raw_value)
         if isinstance(current, bool):
             return raw_value.lower() in {"true", "1", "yes", "on"}
         if isinstance(current, int):

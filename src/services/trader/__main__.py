@@ -7,9 +7,16 @@ import structlog
 from src.config.settings import get_settings
 from src.core.logging import configure_logging
 from src.db.engine import Database
+from src.services.ai.context_builder import ContextBuilder
+from src.services.ai.decision_engine import DecisionEngine
+from src.services.ai.minimax_client import MiniMaxClient
+from src.services.ai.prompt_builder import PromptBuilder
+from src.services.ai.response_parser import ResponseParser
 from src.services.execution.clob_client import ClobClientWrapper
+from src.services.execution.exit_engine import ExitEngine
 from src.services.execution.order_manager import OrderManager
 from src.services.execution.paper_trader import PaperTrader
+from src.services.execution.position_monitor import PositionMonitor
 from src.services.execution.ws_fill_tracker import WSFillTracker
 from src.services.indicators.signal_engine import SignalEngine
 from src.services.indicators.taapi_client import TaapiClient
@@ -40,6 +47,10 @@ async def _run() -> None:
     market_finder = MarketFinder(gamma_client, validator)
     signal_engine = SignalEngine(settings)
     risk_engine = RiskEngine(settings, kill_switch, position_tracker)
+    minimax_client = MiniMaxClient(settings)
+    context_builder = ContextBuilder(settings)
+    prompt_builder = PromptBuilder()
+    response_parser = ResponseParser()
 
     ws_fill_tracker: WSFillTracker | None = None
     if settings.is_live:
@@ -52,6 +63,26 @@ async def _run() -> None:
     async def alert_callback(message: str) -> None:
         logger.info("trader_alert", message=message)
 
+    decision_engine = DecisionEngine(
+        settings=settings,
+        minimax_client=minimax_client,
+        context_builder=context_builder,
+        prompt_builder=prompt_builder,
+        response_parser=response_parser,
+        alert_callback=alert_callback,
+    )
+    exit_engine = ExitEngine(settings)
+    position_monitor = PositionMonitor(
+        settings=settings,
+        database=database,
+        order_manager=order_manager,
+        exit_engine=exit_engine,
+        taapi_client=taapi_client,
+        signal_engine=signal_engine,
+        on_exit_callback=None,
+        alert_callback=alert_callback,
+    )
+
     trader = TraderService(
         settings=settings,
         database=database,
@@ -60,10 +91,14 @@ async def _run() -> None:
         signal_engine=signal_engine,
         risk_engine=risk_engine,
         order_manager=order_manager,
+        exit_engine=exit_engine,
+        position_monitor=position_monitor,
         kill_switch=kill_switch,
         position_tracker=position_tracker,
+        decision_engine=decision_engine,
         alert_callback=alert_callback,
     )
+    position_monitor.set_on_exit_callback(trader.handle_position_exit)
 
     try:
         if settings.is_live:
@@ -80,6 +115,8 @@ async def _run() -> None:
     finally:
         if ws_fill_tracker is not None:
             await ws_fill_tracker.stop()
+        await position_monitor.stop_all()
+        await decision_engine.close()
         await taapi_client.close()
         await gamma_client.close()
         await database.dispose()

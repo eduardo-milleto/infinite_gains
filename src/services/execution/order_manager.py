@@ -5,6 +5,7 @@ from typing import Protocol
 
 from src.core.enums import TradeDirection
 from src.core.types import MarketContext, OrderResult
+from src.db.models import TradeModel
 
 
 class ExecutionClient(Protocol):
@@ -15,7 +16,10 @@ class ExecutionClient(Protocol):
         token_id: str,
         price: Decimal,
         size_usdc: Decimal,
+        side: str = "BUY",
     ) -> OrderResult: ...
+
+    async def get_token_price(self, token_id: str) -> Decimal: ...
 
 
 class OrderManager:
@@ -31,12 +35,31 @@ class OrderManager:
     ) -> OrderResult:
         token_id = market_context.token_id_up if direction == TradeDirection.UP else market_context.token_id_down
         if direction == TradeDirection.UP:
-            price = Decimal("0.53")
+            price = market_context.up_price
         else:
-            price = Decimal("0.47")
+            price = market_context.down_price
         return await self._client.place_limit_order(
             direction=direction,
             token_id=token_id,
             price=price,
             size_usdc=size_usdc,
+            side="BUY",
         )
+
+    async def place_exit_order(
+        self,
+        *,
+        trade: TradeModel,
+        exit_price: Decimal,
+    ) -> OrderResult:
+        direction = TradeDirection(trade.direction)
+        return await self._client.place_limit_order(
+            direction=direction,
+            token_id=trade.token_id,
+            price=exit_price,
+            size_usdc=Decimal(str(trade.size_usdc)),
+            side="SELL",
+        )
+
+    async def get_token_price(self, token_id: str) -> Decimal:
+        return await self._client.get_token_price(token_id)

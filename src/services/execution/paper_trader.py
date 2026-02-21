@@ -10,6 +10,7 @@ from src.core.types import OrderResult
 class PaperTrader:
     def __init__(self) -> None:
         self._orders: dict[str, OrderResult] = {}
+        self._token_prices: dict[str, Decimal] = {}
 
     async def place_limit_order(
         self,
@@ -18,6 +19,7 @@ class PaperTrader:
         token_id: str,
         price: Decimal,
         size_usdc: Decimal,
+        side: str = "BUY",
     ) -> OrderResult:
         order_id = f"paper-{uuid4()}"
         result = OrderResult(
@@ -31,10 +33,15 @@ class PaperTrader:
             raw_response={
                 "order_id": order_id,
                 "simulated": True,
+                "side": side,
             },
         )
         self._orders[order_id] = result
+        self._token_prices[token_id] = price
         return result
+
+    async def get_token_price(self, token_id: str) -> Decimal:
+        return self._token_prices.get(token_id, Decimal("0.50"))
 
     async def cancel_order(self, order_id: str) -> dict[str, str]:
         existed = order_id in self._orders
