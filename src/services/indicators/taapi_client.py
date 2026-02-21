@@ -106,3 +106,30 @@ class TaapiClient:
             stoch_k_curr=k_curr,
             stoch_d_curr=d_curr,
         )
+
+    async def fetch_trend_direction(self) -> str:
+        symbol = self._settings.taapi_symbol.replace("/", "").upper()
+        if not symbol:
+            raise APIFailureError("Invalid TAAPI_SYMBOL for trend fetch")
+
+        response = await self._client.get(
+            "https://api.binance.com/api/v3/klines",
+            params={
+                "symbol": symbol,
+                "interval": self._settings.strategy_trend_interval,
+                "limit": 1,
+            },
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, list) or not payload or not isinstance(payload[0], list) or len(payload[0]) < 5:
+            raise APIFailureError("Trend response invalid from Binance klines")
+
+        candle = payload[0]
+        open_price = Decimal(str(candle[1]))
+        close_price = Decimal(str(candle[4]))
+        if close_price > open_price:
+            return "UP"
+        if close_price < open_price:
+            return "DOWN"
+        return "FLAT"

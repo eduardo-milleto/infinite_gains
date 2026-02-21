@@ -62,3 +62,44 @@ def test_signal_engine_none() -> None:
     )
 
     assert signal.signal_type == SignalType.NONE
+
+
+def test_signal_engine_trend_filter_allows_long_on_daily_up() -> None:
+    settings = Settings(taapi_interval="5m", strategy_trend_filter_enabled=True)
+    engine = SignalEngine(settings)
+
+    signal = engine.evaluate(
+        _snapshot(rsi_prev="29", rsi_curr="31", k_prev="10", d_prev="12", k_curr="16", d_curr="14"),
+        daily_trend="UP",
+        interval="5m",
+    )
+
+    assert signal.signal_type == SignalType.LONG
+
+
+def test_signal_engine_trend_filter_blocks_short_on_daily_up() -> None:
+    settings = Settings(taapi_interval="5m", strategy_trend_filter_enabled=True)
+    engine = SignalEngine(settings)
+
+    signal = engine.evaluate(
+        _snapshot(rsi_prev="72", rsi_curr="69", k_prev="90", d_prev="88", k_curr="85", d_curr="87"),
+        daily_trend="UP",
+        interval="5m",
+    )
+
+    assert signal.signal_type == SignalType.NONE
+    assert "daily trend is UP" in signal.reason
+
+
+def test_signal_engine_trend_filter_blocks_long_on_daily_down() -> None:
+    settings = Settings(taapi_interval="5m", strategy_trend_filter_enabled=True)
+    engine = SignalEngine(settings)
+
+    signal = engine.evaluate(
+        _snapshot(rsi_prev="29", rsi_curr="31", k_prev="10", d_prev="12", k_curr="16", d_curr="14"),
+        daily_trend="DOWN",
+        interval="5m",
+    )
+
+    assert signal.signal_type == SignalType.NONE
+    assert "daily trend is DOWN" in signal.reason

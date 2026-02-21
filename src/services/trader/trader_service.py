@@ -119,7 +119,18 @@ class TraderService:
             await self._trip_kill_switch(f"TAAPI failure: {exc}")
             raise
 
-        signal = self._signal_engine.evaluate(snapshot)
+        daily_trend: str | None = None
+        if self._settings.strategy_trend_filter_enabled and self._settings.taapi_interval.lower() == "5m":
+            try:
+                daily_trend = await self._taapi_client.fetch_trend_direction()
+            except Exception as exc:
+                logger.warning("daily_trend_fetch_failed", error=str(exc))
+
+        signal = self._signal_engine.evaluate(
+            snapshot,
+            daily_trend=daily_trend,
+            interval=self._settings.taapi_interval,
+        )
         SIGNALS_EVALUATED.inc()
         if signal.signal_type != SignalType.NONE and self._decision_engine is not None and len(market_candidates) > 1:
             try:

@@ -56,6 +56,8 @@ class Settings(BaseSettings):
     strategy_stoch_k_smooth: int = 3
     strategy_stoch_oversold: Decimal = Decimal("20")
     strategy_stoch_overbought: Decimal = Decimal("80")
+    strategy_trend_filter_enabled: bool = True
+    strategy_trend_interval: str = "1d"
 
     market_max_spread: Decimal = Decimal("0.03")
     market_no_trade_before_close_secs: int = 120
@@ -131,6 +133,8 @@ class Settings(BaseSettings):
             "stoch_k_smooth": str(self.strategy_stoch_k_smooth),
             "stoch_oversold": str(self.strategy_stoch_oversold),
             "stoch_overbought": str(self.strategy_stoch_overbought),
+            "trend_filter_enabled": str(self.strategy_trend_filter_enabled),
+            "trend_interval": self.strategy_trend_interval,
         }
 
     def snapshot_risk(self) -> dict[str, str]:
