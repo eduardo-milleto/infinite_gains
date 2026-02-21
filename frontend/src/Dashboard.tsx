@@ -458,7 +458,7 @@ function HudPanel({
   children: ReactNode;
 }) {
   return (
-    <section className={`${PANEL_CLASS} ${className ?? ''}`}>
+    <section className={`${PANEL_CLASS} ${className ?? ''} flex min-h-0 flex-col`}>
       <div className="pointer-events-none absolute left-0 top-0 h-6 w-6 border-l border-t border-[#00E5FF]" />
       <div className="pointer-events-none absolute left-0 top-0 h-[2px] w-8 bg-[#00E5FF]/90 shadow-[0_0_10px_rgba(0,229,255,0.95)]" />
       <div className="pointer-events-none absolute left-0 top-0 h-8 w-[2px] bg-[#00E5FF]/90 shadow-[0_0_10px_rgba(0,229,255,0.95)]" />
@@ -468,7 +468,7 @@ function HudPanel({
         {right}
       </header>
 
-      <div className="h-[calc(100%-2.2rem)]">{children}</div>
+      <div className="min-h-0 flex-1">{children}</div>
     </section>
   );
 }
@@ -1451,10 +1451,7 @@ export function Dashboard({ onLogout, onNavigate }: DashboardProps) {
   );
 
   return (
-    <div
-      className="relative min-h-screen overflow-hidden bg-[#020408] text-[#E0F4FF]"
-      style={{ fontFamily: 'Inter, sans-serif' }}
-    >
+    <div className="relative h-[100dvh] overflow-hidden bg-[#020408] text-[#E0F4FF]" style={{ fontFamily: 'Inter, sans-serif' }}>
       <style>{`@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Orbitron:wght@500;700;900&display=swap');`}</style>
 
       <div className="pointer-events-none absolute inset-0 opacity-20" style={{ backgroundImage: noiseTexture }} />
@@ -1499,7 +1496,7 @@ export function Dashboard({ onLogout, onNavigate }: DashboardProps) {
         )}
       </AnimatePresence>
 
-      <div className="relative z-20 grid min-h-screen grid-rows-[64px_minmax(0,1fr)_48px]">
+      <div className="relative z-20 grid h-full min-h-0 grid-rows-[64px_minmax(0,1fr)_48px]">
         <header className="grid grid-cols-12 items-center border-b border-[#0D2137] px-3">
           <div className="col-span-12 flex items-center justify-between gap-2 lg:col-span-4">
             <motion.div
